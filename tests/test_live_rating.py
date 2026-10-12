@@ -29,8 +29,9 @@ def live_context():
 def test_real_model_matching(case, live_context):
     client, rules, options = live_context
     department, eligible = select_department(case['platform'], rules)
-    # 标题复用实际需求文本，不将测试标签或预期结论传给模型。
-    result = client.classify({'title': case['description'], 'description': case['description'],
+    # 使用实际联调时的标题与备注，验证任务管理标记不干扰业务判断。
+    result = client.classify({'title': case.get('title_prefix', '') + case['description'],
+                              'description': case['description'], 'notes': case.get('notes', ''),
                               'platform': case['platform'], 'material_issues': []},
                              eligible, options, [], department)
     assert result['matched'] == (case['expected_type'] is not None), result
@@ -42,3 +43,23 @@ def test_real_model_matching(case, live_context):
     else:
         assert result['unmatched_reason']
         assert len(result['candidates']) >= case['min_candidates'], result
+
+        if 'expected_candidate_contents' in case:
+            actual_contents = sorted(next(r['content'] for r in eligible if r['record_id'] == c['rule_id'])
+                                     for c in result['candidates'])
+            assert actual_contents == sorted(case['expected_candidate_contents']), result
+        if case.get('missing_information_only_department'):
+            assert result['missing_information'], result
+            assert all('部门' in item for item in result['missing_information']), result
+            assert not any(word in ' '.join(result['missing_information'])
+                           for word in ('直播', 'GIF', '贴片', '使用场景')), result
+    explanations = [result.get('reason') or '', result.get('unmatched_reason') or '',
+                    *result['missing_information']]
+    for candidate in result['candidates']:
+        explanations.extend([candidate['match_reason'], candidate['uncertainty']])
+    explanation = ' '.join(explanations)
+    for term in ('allowed_work_types', 'confirmed_department', 'record_id', 'content',
+                 'departments', 'adjustment', 'default_level', 'work_type',
+                 '联调', '验收', '测试', '真实任务', '真实设计', '正式评级'):
+        assert term not in explanation, result
+    assert not any(rule['record_id'] in explanation for rule in eligible), result
