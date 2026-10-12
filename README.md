@@ -31,6 +31,8 @@
 
 程序按「所属平台」中明确出现的规则部门名称筛选，例如「渠道部-平台」。没有唯一部门时，模型只能列候选并要求补充部门；不根据提交人姓名猜测。已确认部门后仅向模型发送该部门适用的规则，输出再次校验。规则名称可以相同，规则 ID 必须唯一；回写文本展示具体规则 ID、内容、部门和分配方式。
 
+在适用部门范围内，标题或需求说明明确命中「包含的工作」关键词时优先匹配；更具体的工作描述优先于宽泛相关项。未提供套版等细节时使用规则默认等级，明确符合调整条件才升降档。仅在实际多规则歧义、信息过少或内容冲突时返回候选，不猜测需求未提到的使用场景。
+
 `prompts/classify.md` 保存判断要求及 JSON 输出协议。输出包括 `matched`、`department`、`rule_id`、`level`、`work_type`、`reason`、`candidates`、`unmatched_reason`、`missing_information`。程序只校验结构和引用一致性，具体分档准确性需要业务样本验证。
 
 默认最多 8 张图片，单张 10 MiB，总计 20 MiB，可通过 `MAX_IMAGES`、`MAX_IMAGE_BYTES`、`MAX_TOTAL_IMAGE_BYTES` 调整；编码后的完整模型请求限制为 45 MiB。任一附件不支持、过大或下载失败时，向模型明确传入材料缺口；只允许输出候选，禁止基于部分材料给出确定评级。
@@ -51,6 +53,8 @@ cp .env.example .env
 ```bash
 uv run flask --app app.main:create_app run --host 127.0.0.1 --port 8000
 uv run pytest
+# 可选：真实模型业务回归，产生 API 调用但不写入飞书
+LIVE_AI_TESTS=1 uv run pytest tests/test_live_rating.py -q
 ```
 
 开发时关闭自动重载，保证内存去重由单个进程维护。

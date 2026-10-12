@@ -1,0 +1,10 @@
+[
+  {"name":"满赠活动图", "platform":"渠道部-测试平台", "description":"做一张满赠活动图。", "expected_type":"满减、满赠图", "expected_level":"B", "rule_content":"满减／满返／满赠图"},
+  {"name":"满赠套版改字", "platform":"渠道部-测试平台", "description":"用现有模板替换满赠活动文案，其他版式不变。", "expected_type":"满减、满赠图", "expected_level":"A", "rule_content":"满减／满返／满赠图"},
+  {"name":"直播赠品贴片", "platform":"渠道部-测试平台", "description":"做直播间赠品贴片。", "expected_type":"直播间视觉素材", "expected_level":"B", "rule_content":"赠品贴片"},
+  {"name":"白底图处理", "platform":"市场部-测试平台", "description":"商品白底图处理，基础抠图、裁切和平台尺寸适配。", "expected_type":"白底图处理", "expected_level":"A", "rule_content":"白底图"},
+  {"name":"首页加模块", "platform":"渠道部-测试平台", "description":"首页加模块。", "expected_type":"店铺装修", "expected_level":"B", "rule_content":"首页加模块"},
+  {"name":"信息不足", "platform":"渠道部-测试平台", "description":"做一张图。", "expected_type":null, "expected_level":null, "min_candidates":0},
+  {"name":"多项工作", "platform":"渠道部-测试平台", "description":"做直播顶图和满赠GIF，两项都需要交付。", "expected_type":null, "expected_level":null, "min_candidates":2},
+  {"name":"部门未知", "platform":"", "description":"做一张满赠活动图。", "expected_type":null, "expected_level":null, "min_candidates":0}
+]
