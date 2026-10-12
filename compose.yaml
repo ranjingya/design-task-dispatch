@@ -1,0 +1,22 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      FIELD_MAPPING_PATH: /app/config/fields.json
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - type: bind
+        source: ${CONFIG_DIR:-./config}
+        target: /app/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PROMPTS_DIR:-./prompts}
+        target: /app/prompts
+        read_only: true
+        bind:
+          create_host_path: false

@@ -1,0 +1,16 @@
+{
+  "title": "任务名称",
+  "description": "需求说明",
+  "submitter": "需求人",
+  "platform": "所属平台",
+  "deadline": "截止时间",
+  "attachments": "附件",
+  "notes": "备注",
+  "work_type": "工作类型",
+  "rule_explanation": "匹配规则说明",
+  "recommended_assignee": "系统推荐人",
+  "assignee": "最终负责人",
+  "leader_confirmed": "组长确认",
+  "assignee_confirmed": "负责人确认",
+  "completed_at": "实际完成时间"
+}
