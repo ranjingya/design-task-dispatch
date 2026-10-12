@@ -85,19 +85,3 @@ def test_failed_record_can_be_retried(settings):
     finally:
         dispatcher.close()
     assert runner.call_count == 2
-
-
-def test_missing_material_does_not_write(settings):
-    feishu = Mock()
-    feishu.get_record.return_value = {"任务名称": "测试"}
-    with pytest.raises(ValueError, match="需求说明"):
-        process_record("rec123", load_fields(settings.fields_path), feishu)
-    feishu.update_record.assert_not_called()
-
-
-def test_read_only_stage_does_not_write(settings):
-    feishu = Mock()
-    feishu.get_record.return_value = {"任务名称": "测试", "需求说明": "测试说明"}
-    process_record("rec123", load_fields(settings.fields_path), feishu)
-    feishu.get_record.assert_called_once_with("rec123")
-    feishu.update_record.assert_not_called()

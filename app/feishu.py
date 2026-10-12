@@ -70,3 +70,59 @@ class FeishuClient:
         logger.info("回写飞书记录：record_id=%s field_count=%d", record_id, len(fields))
         self._request("PUT", self._record_path(record_id), json={"fields": fields},
                       headers={"Authorization": f"Bearer {self._access_token()}"})
+
+    def _list_all(self, table_id: str, resource: str) -> list[dict]:
+        """功能说明：完整读取分页资源。参数 table_id：表 ID；resource：fields 或 records。返回值：全部项目列表。"""
+        path = f"/bitable/v1/apps/{quote(self.settings.base_token, safe='')}/tables/{quote(table_id, safe='')}/{resource}"
+        items, seen = [], set()
+        params = {"page_size": 100}
+        while True:
+            data = self._request("GET", path, params=params,
+                                 headers={"Authorization": f"Bearer {self._access_token()}"})["data"]
+            items.extend(data.get("items", []))
+            if not data.get("has_more"):
+                return items
+            token = data.get("page_token")
+            if not token or token in seen:
+                raise RuntimeError("飞书分页游标异常，无法确认资源完整")
+            seen.add(token)
+            params["page_token"] = token
+
+    def get_fields(self) -> list[dict]:
+        """读取需求表字段结构及单选选项。"""
+        return self._list_all(self.settings.table_id, "fields")
+
+    def get_rules(self) -> list[dict]:
+        """读取规则表全部记录，保留真实规则 ID 和字段内容。"""
+        rules = self._list_all(self.settings.rules_table_id, "records")
+        rules = [{"record_id": item["record_id"], "fields": item["fields"]}
+                 for item in rules if item.get("fields")]
+        if not rules:
+            raise ValueError("规则表为空，无法评级")
+        logger.info("规则加载完成：count=%d", len(rules))
+        return rules
+
+    def download_image(self, file_token: str, record_id: str, field_id: str, limit: int) -> bytes:
+        """功能说明：限量下载飞书素材。参数 file_token：素材令牌；record_id：所属记录；field_id：附件字段；limit：字节上限。返回值：文件字节。"""
+        import json
+
+        extra = {"bitablePerm": {"tableId": self.settings.table_id,
+                                 "attachments": {field_id: {record_id: [file_token]}}}}
+        url = API + f"/drive/v1/medias/{quote(file_token, safe='')}/download"
+        try:
+            with httpx.stream("GET", url, timeout=30, follow_redirects=True,
+                              params={"extra": json.dumps(extra)},
+                              headers={"Authorization": f"Bearer {self._access_token()}"}) as response:
+                if not response.is_success:
+                    raise RuntimeError(f"飞书附件下载失败：HTTP {response.status_code}")
+                chunks, size = [], 0
+                for chunk in response.iter_bytes(65536):
+                    size += len(chunk)
+                    if size > limit:
+                        raise ValueError("图片超过大小限制")
+                    chunks.append(chunk)
+                if not size:
+                    raise ValueError("图片为空")
+                return b"".join(chunks)
+        except httpx.RequestError:
+            raise RuntimeError("飞书附件下载网络异常") from None

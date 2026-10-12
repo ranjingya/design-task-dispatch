@@ -7,7 +7,7 @@
   "attachments": "附件",
   "notes": "备注",
   "work_type": "工作类型",
-  "rule_explanation": "匹配规则说明",
+  "rule_explanation": "匹配结果",
   "recommended_assignee": "系统推荐人",
   "assignee": "最终负责人",
   "leader_confirmed": "组长确认",

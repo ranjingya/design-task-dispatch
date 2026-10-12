@@ -6,6 +6,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
+from app.ai import AIClient
+from app.materials import collect_images
 from app.config import Settings, load_fields
 from app.feishu import FeishuClient
 
@@ -13,15 +15,57 @@ logger = logging.getLogger(__name__)
 
 
 def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient) -> None:
-    """功能说明：读取和校验需求。参数 record_id：记录 ID；mapping：本次字段快照；feishu：飞书客户端。返回值：无。"""
-    fields = feishu.get_record(record_id)
-    demand = {key: fields.get(name) for key, name in mapping.items()}
-    missing = [mapping[key] for key in ("title", "description") if not demand.get(key)]
-    if missing:
-        raise ValueError("需求信息不完整，缺少：" + "、".join(missing))
-    logger.info("需求读取完成：record_id=%s mapped_fields=%d stage=record_loaded",
-                record_id, len(demand))
-    # AI 评级和人员分配在此接入；当前入口只读取并校验需求。
+    """功能说明：读取需求和规则、调用 AI 并回写结果。参数 record_id：记录 ID；mapping：本次字段快照；feishu：飞书客户端。返回值：无。"""
+    schema = {item["field_name"]: item for item in feishu.get_fields()}
+    result_name = mapping.get("rule_explanation")
+    type_name = mapping.get("work_type")
+    if schema.get(result_name, {}).get("type") != 1 or schema.get(type_name, {}).get("type") != 3:
+        raise ValueError("结果字段需为可写文本，工作类型需为单选，请核对字段映射")
+    try:
+        feishu.settings.validate_ai()
+        fields = feishu.get_record(record_id)
+        demand = {key: fields.get(mapping[key]) for key in
+                  ("title", "description", "platform", "deadline", "notes") if key in mapping}
+        missing = [mapping[key] for key in ("title", "description") if not demand.get(key)]
+        logger.info("需求读取完成：record_id=%s field_count=%d", record_id, len(demand))
+        if missing:
+            result = {"status": "needs_review", "reason": "需求信息不完整",
+                      "missing_information": missing, "matched_rule_id": None}
+        else:
+            rules = feishu.get_rules()
+            options = [item["name"] for item in schema[type_name].get("property", {}).get("options", [])]
+            if not options:
+                raise ValueError("工作类型没有可用选项")
+            attachment_name = mapping.get("attachments")
+            attachment_field = schema.get(attachment_name, {})
+            if attachment_name and attachment_field.get("type") != 17:
+                raise ValueError("附件字段映射无效")
+            images, issues = collect_images(fields.get(attachment_name) or [], record_id,
+                                            attachment_field.get("field_id", ""), feishu)
+            if issues:
+                result = {"status": "needs_review", "reason": "附件材料未完整读取，需补充后重新评级",
+                          "missing_information": issues, "matched_rule_id": None}
+            else:
+                result = AIClient(feishu.settings).classify(demand, rules, options, images)
+        explanation = result["reason"]
+        if result.get("matched_rule_id"):
+            explanation = f"匹配规则：{result['matched_rule_id']}\n" + explanation
+        if result["status"] == "needs_review":
+            explanation = "待确认：" + explanation
+        if result["missing_information"]:
+            explanation += "\n待补充：" + "；".join(result["missing_information"])
+        updates = {result_name: explanation[:10000]}
+        if result["status"] == "rated":
+            updates[type_name] = result["work_type"]
+        feishu.update_record(record_id, updates)
+        logger.info("评级回写完成：record_id=%s status=%s", record_id, result["status"])
+    except Exception:
+        logger.exception("评级流程失败：record_id=%s", record_id)
+        try:
+            feishu.update_record(record_id, {result_name: "处理失败：读取材料、调用模型或校验结果失败，请查看服务日志并重新触发。"})
+        except Exception:
+            logger.exception("失败提示回写失败：record_id=%s", record_id)
+        raise
 
 
 class Dispatcher:
