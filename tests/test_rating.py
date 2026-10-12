@@ -34,7 +34,7 @@ REVIEW = {"matched": False, "department": "测试部", "level": None, "work_type
 @pytest.fixture
 def settings(tmp_path):
     return Settings("app", "secret", "base", "table", "token", tmp_path / "fields.json",
-                    rules_table_id="rules", ai_key="private-key", ai_model="test-model",
+                    rules_cache_path=tmp_path / "rules.json", rules_table_id="rules", ai_key="private-key", ai_model="test-model",
                     prompt_path=ROOT / "prompts/classify.md")
 
 

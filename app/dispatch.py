@@ -10,7 +10,8 @@ from app.ai import AIClient
 from app.materials import collect_images
 from app.config import Settings, load_fields
 from app.feishu import FeishuClient
-from app.rules import normalize_rules, select_department, review, format_result
+from app.rules import select_department, review, format_result
+from app.rule_cache import load_daily_rules
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
         fields = feishu.get_record(record_id)
         demand = {key: fields.get(mapping[key]) for key in
                   ("title", "description", "platform", "deadline", "notes") if key in mapping}
-        rules = normalize_rules(feishu.get_rules(), feishu.settings.rule_fields_path)
+        rules = load_daily_rules(feishu)
         department, eligible = select_department(demand.get("platform"), rules)
         options = [item["name"] for item in schema[type_name].get("property", {}).get("options", [])]
         levels = {item["name"] for item in schema[level_name].get("property", {}).get("options", [])}

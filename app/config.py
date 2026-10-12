@@ -28,6 +28,7 @@ class Settings:
     ai_model: str = ""
     prompt_path: Path = ROOT / "prompts/classify.md"
     rule_fields_path: Path = ROOT / "config/rule_fields.json"
+    rules_cache_path: Path = ROOT / ".cache/rules.json"
     ai_timeout: float = 90
     ai_attempts: int = 3
     max_images: int = 8
@@ -55,6 +56,7 @@ class Settings:
             ai_model=os.getenv("DEEPSEEK_MODEL", "").strip(),
             prompt_path=Path(os.getenv("CLASSIFY_PROMPT_PATH", str(ROOT / "prompts/classify.md"))),
             rule_fields_path=Path(os.getenv("RULE_FIELD_MAPPING_PATH", str(ROOT / "config/rule_fields.json"))),
+            rules_cache_path=Path(os.getenv("RULES_CACHE_PATH", str(ROOT / ".cache/rules.json"))),
             ai_timeout=float(os.getenv("AI_TIMEOUT_SECONDS", "90")),
             ai_attempts=int(os.getenv("AI_MAX_ATTEMPTS", "3")),
             max_images=int(os.getenv("MAX_IMAGES", "8")),

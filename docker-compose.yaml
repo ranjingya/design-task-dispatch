@@ -9,12 +9,14 @@ services:
       TZ: Asia/Shanghai
       FIELD_MAPPING_PATH: /app/config/fields.json
       RULE_FIELD_MAPPING_PATH: /app/config/rule_fields.json
+      RULES_CACHE_PATH: /app/cache/rules.json
       CLASSIFY_PROMPT_PATH: /app/prompts/classify.md
     expose:
       - "8000"
     volumes:
       - ./config:/app/config:ro
       - ./prompts:/app/prompts:ro
+      - rules-cache:/app/cache
     labels:
       traefik.enable: "true"
       traefik.docker.network: traefik-network
@@ -29,3 +31,6 @@ services:
 networks:
   traefik-network:
     external: true
+
+volumes:
+  rules-cache:

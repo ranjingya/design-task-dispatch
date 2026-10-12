@@ -14,3 +14,6 @@ wheels/
 .env.*
 !.env.example
 .pytest_cache/
+
+# 本地规则快照
+.cache/
