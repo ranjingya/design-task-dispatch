@@ -31,20 +31,29 @@ uv run pytest
 
 ## Docker 部署与外部配置
 
+GitHub Actions 在推送 `v*` 标签或手动触发时构建根目录 Dockerfile，将镜像推送到 GHCR，再通过 SCP 和 SSH 部署。
+
+仓库配置变量 `DEPLOY_DIR` 为本项目独立部署目录；配置 secrets：`SSH_HOST`、`SSH_PORT`、`SSH_USER`、`SSH_PRIVATE_KEY`、`SSH_PRIVATE_KEY_PASSPHRASE`。首次部署前在服务器部署目录准备 `.env`，并确保已有 Traefik 外部网络 `traefik-network`。
+
+镜像地址为 `ghcr.io/ranjingya/design-task-dispatch:latest`，工作流使用仓库所有者作为 GHCR 命名空间；仓库应位于 `ranjingya` 名下，若使用其他组织则同步修改 Compose 镜像前缀。
+
+自动部署仅复制 Compose 文件。首次部署从镜像初始化 `config/fields.json` 和 `prompts/classify.md`，后续部署保留服务器已有配置。完成首次部署后，可手动执行：
+
 ```bash
-docker compose up -d --build
-docker compose logs -f app
+docker compose pull design-task-dispatch
+docker compose up -d design-task-dispatch
+docker compose logs -f design-task-dispatch
 ```
 
-宿主机 `./config` 挂载到 `/app/config`，`./prompts` 挂载到 `/app/prompts`，均为容器内只读。可在 `.env` 中设置 `CONFIG_DIR`、`PROMPTS_DIR` 指向其他已存在目录。外部配置目录应包含 `fields.json`。
+部署目录下的 `./config` 挂载到 `/app/config`，`./prompts` 挂载到 `/app/prompts`，均为容器内只读。字段配置在宿主机的 `config/fields.json` 中维护。
 
 修改宿主机 `config/fields.json` 后，下一个新任务读取最新映射；处理中任务继续使用接收时的快照。JSON 无效时新请求返回 503，修复文件后重试即可，无需重建镜像。环境变量修改后执行 `docker compose up -d --force-recreate`。
 
-镜像使用 Gunicorn，固定一个进程、四个请求线程和一个后台处理线程。服务仅映射宿主机 `127.0.0.1:8000`，由同机反向代理提供 HTTPS：
+镜像使用 Gunicorn，固定一个进程、四个请求线程和一个后台处理线程。Traefik 通过 `traefik-network` 访问容器的 8000 端口，使用 `websecure` 入口和 `myresolver` 证书解析器提供 HTTPS：
 
 `https://design-dispatch.kktree.cn/webhook/task`
 
-域名解析、HTTPS 证书和反向代理需在部署环境配置。
+域名需解析到部署服务器；Traefik 的入口、证书解析器及外部网络沿用服务器已有配置。
 
 ## 飞书自动化
 

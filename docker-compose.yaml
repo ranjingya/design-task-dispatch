@@ -1,44 +1,29 @@
 services:
-  jd-competitor-analysis-web:
-    image: "ghcr.io/ranjingya/jd-competitor-analysis-web:latest"
-    container_name: jd-competitor-analysis-web
-    restart: unless-stopped
-    environment:
-      TZ: Asia/Shanghai
-    depends_on:
-      jd-competitor-analysis-backend:
-        condition: service_healthy
-    expose:
-      - "80"
-    labels:
-      traefik.enable: "true"
-      traefik.docker.network: traefik-network
-      traefik.http.routers.jd-competitor-analysis.rule: "Host(`jd-comp.skills.kktree.cn`)"
-      traefik.http.routers.jd-competitor-analysis.entrypoints: websecure
-      traefik.http.routers.jd-competitor-analysis.tls: "true"
-      traefik.http.routers.jd-competitor-analysis.tls.certresolver: myresolver
-      traefik.http.services.jd-competitor-analysis.loadbalancer.server.port: 80
-    networks:
-      - app-internal
-      - traefik-network
-
-  jd-competitor-analysis-backend:
-    image: "ghcr.io/ranjingya/jd-competitor-analysis-backend:latest"
-    container_name: jd-competitor-analysis-backend
+  design-task-dispatch:
+    image: "ghcr.io/ranjingya/design-task-dispatch:latest"
+    container_name: design-task-dispatch
     restart: unless-stopped
     env_file:
       - .env
     environment:
       TZ: Asia/Shanghai
+      FIELD_MAPPING_PATH: /app/config/fields.json
     expose:
       - "8000"
     volumes:
-      - ./data:/app/data
+      - ./config:/app/config:ro
+      - ./prompts:/app/prompts:ro
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik-network
+      traefik.http.routers.design-task-dispatch.rule: "Host(`design-dispatch.kktree.cn`)"
+      traefik.http.routers.design-task-dispatch.entrypoints: websecure
+      traefik.http.routers.design-task-dispatch.tls: "true"
+      traefik.http.routers.design-task-dispatch.tls.certresolver: myresolver
+      traefik.http.services.design-task-dispatch.loadbalancer.server.port: 8000
     networks:
-      - app-internal
+      - traefik-network
 
 networks:
-  app-internal:
-    driver: bridge
   traefik-network:
     external: true

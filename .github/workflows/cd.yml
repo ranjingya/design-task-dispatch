@@ -22,12 +22,9 @@ jobs:
     strategy:
       matrix:
         include:
-          - service: web
-            context: ./web
-            image: jd-competitor-analysis-web
-          - service: backend
-            context: ./backend
-            image: jd-competitor-analysis-backend
+          - service: design-task-dispatch
+            context: .
+            image: design-task-dispatch
 
     steps:
       - name: Checkout repository
@@ -81,7 +78,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           passphrase: ${{ secrets.SSH_PRIVATE_KEY_PASSPHRASE }}
-          source: "docker-compose.yaml,scripts/run-daily-analysis.sh,data/deepseek-pricing.json"
+          source: "docker-compose.yaml"
           target: ${{ vars.DEPLOY_DIR }}
 
       - name: Deploy via SSH
@@ -103,8 +100,17 @@ jobs:
             trap 'rm -rf -- "$deploy_docker_config"' EXIT
             echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
             cd "${{ vars.DEPLOY_DIR }}"
-            mkdir -p data scripts
-            chmod +x scripts/run-daily-analysis.sh
-            docker compose pull jd-competitor-analysis-web jd-competitor-analysis-backend
-            docker compose up -d --remove-orphans jd-competitor-analysis-web jd-competitor-analysis-backend
+            mkdir -p config prompts
+            docker compose pull design-task-dispatch
+            image=$(docker compose config --images)
+            # 首次部署从镜像提取默认配置，后续保留服务器上的修改。
+            if [ ! -e config/fields.json ]; then
+              docker run --rm --entrypoint cat "$image" /app/config/fields.json > config/fields.json.tmp
+              mv config/fields.json.tmp config/fields.json
+            fi
+            if [ ! -e prompts/classify.md ]; then
+              docker run --rm --entrypoint cat "$image" /app/prompts/classify.md > prompts/classify.md.tmp
+              mv prompts/classify.md.tmp prompts/classify.md
+            fi
+            docker compose up -d --remove-orphans design-task-dispatch
             docker image prune -f
