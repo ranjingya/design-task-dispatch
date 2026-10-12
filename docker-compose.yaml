@@ -1,0 +1,44 @@
+services:
+  jd-competitor-analysis-web:
+    image: "ghcr.io/ranjingya/jd-competitor-analysis-web:latest"
+    container_name: jd-competitor-analysis-web
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    depends_on:
+      jd-competitor-analysis-backend:
+        condition: service_healthy
+    expose:
+      - "80"
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik-network
+      traefik.http.routers.jd-competitor-analysis.rule: "Host(`jd-comp.skills.kktree.cn`)"
+      traefik.http.routers.jd-competitor-analysis.entrypoints: websecure
+      traefik.http.routers.jd-competitor-analysis.tls: "true"
+      traefik.http.routers.jd-competitor-analysis.tls.certresolver: myresolver
+      traefik.http.services.jd-competitor-analysis.loadbalancer.server.port: 80
+    networks:
+      - app-internal
+      - traefik-network
+
+  jd-competitor-analysis-backend:
+    image: "ghcr.io/ranjingya/jd-competitor-analysis-backend:latest"
+    container_name: jd-competitor-analysis-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+    expose:
+      - "8000"
+    volumes:
+      - ./data:/app/data
+    networks:
+      - app-internal
+
+networks:
+  app-internal:
+    driver: bridge
+  traefik-network:
+    external: true
