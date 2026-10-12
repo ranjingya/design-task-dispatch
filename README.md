@@ -7,8 +7,8 @@
 - 接收 `POST /webhook/task`，校验共享密钥和记录 ID，在单个后台线程执行评级。
 - 读取需求、规则表全量分页数据及工作类型单选选项，每条需求使用最新规则。
 - 支持 PNG、JPEG、WebP 图片附件，下载后以 Base64 交给 DeepSeek。
-- 模型返回固定 JSON，程序校验规则 ID、已有选项及等级前缀，再回写工作类型和匹配结果。
-- 信息不足、规则冲突或附件无法完整读取时，只写匹配结果中的待确认原因；保留已有工作类型。
+- 模型返回固定 JSON，程序校验规则 ID、部门范围、类型名称及等级，再回写工作类型、分类等级和匹配结果。
+- 信息不足、规则冲突或附件无法完整读取时，匹配结果展示候选规则、可能匹配的依据、未确定原因及待补充信息；工作类型和分类等级清空，避免保留过期评级。
 - 模型网络异常、限流和部分服务端错误最多尝试三次；非法输出不会写入工作类型。失败提示写入匹配结果，详细异常留在日志。
 - 对处理中及最近五分钟成功完成的记录去重；失败记录可重新投递。
 - 字段映射接收任务时读取，提示词调用模型前读取；业务数据及结果保存在飞书。
@@ -17,13 +17,15 @@
 
 ## 评级配置
 
-在 `.env` 配置同一 Base 下的 `FEISHU_RULES_TABLE_ID`，以及 `DEEPSEEK_BASE_URL`、`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`。接口地址可包含 `/v1`，程序追加 `/chat/completions`。默认超时 90 秒，可通过 `AI_TIMEOUT_SECONDS` 调整；`AI_MAX_ATTEMPTS` 为总尝试次数，范围 1～3。
+在 `.env` 配置同一 Base 下的 `FEISHU_RULES_TABLE_ID`，以及 `DEEPSEEK_BASE_URL`、`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`。接口地址可包含 `/v1`，程序追加 `/chat/completions`。模型使用思考模式进行规则判断，输出上限 8192 tokens。默认超时 90 秒，可通过 `AI_TIMEOUT_SECONDS` 调整；`AI_MAX_ATTEMPTS` 为总尝试次数，范围 1～3。
 
-`config/fields.json` 中 `work_type` 对应单选字段，`rule_explanation` 对应可写文本字段，当前分别为「工作类型」「匹配结果」。`attachments` 对应附件字段。规则字段内容原样交给模型，分类标准和选项由飞书维护，规则名称与选项之间的语义冲突交由人工确认。
+`config/fields.json` 中 `work_type`、`level` 对应「工作类型」「分类等级」单选字段，`rule_explanation` 对应「匹配结果」文本字段，`attachments` 对应附件字段。`config/rule_fields.json` 映射规则表的类型、内容、部门、默认等级、调整说明和分配方式，每次任务重新读取。规则表与需求表位于同一 Base。
 
-`prompts/classify.md` 保存判断要求及 JSON 输出协议。输出为 `rated` 或 `needs_review`，包括 `level`、`work_type`、`matched_rule_id`、`reason`、`missing_information`。程序只校验结构和引用一致性，具体分档准确性需要业务样本验证。
+程序按「所属平台」中明确出现的规则部门名称筛选，例如「渠道部-平台」。没有唯一部门时，模型只能列候选并要求补充部门；不根据提交人姓名猜测。已确认部门后仅向模型发送该部门适用的规则，输出再次校验。规则名称可以相同，规则 ID 必须唯一；回写文本展示具体规则 ID、内容、部门和分配方式。
 
-默认最多 8 张图片，单张 10 MiB，总计 20 MiB，可通过 `MAX_IMAGES`、`MAX_IMAGE_BYTES`、`MAX_TOTAL_IMAGE_BYTES` 调整；编码后的完整模型请求限制为 45 MiB。任一附件不支持、过大或下载失败时，本条需求进入待确认，不基于部分材料评级。
+`prompts/classify.md` 保存判断要求及 JSON 输出协议。输出包括 `matched`、`department`、`rule_id`、`level`、`work_type`、`reason`、`candidates`、`unmatched_reason`、`missing_information`。程序只校验结构和引用一致性，具体分档准确性需要业务样本验证。
+
+默认最多 8 张图片，单张 10 MiB，总计 20 MiB，可通过 `MAX_IMAGES`、`MAX_IMAGE_BYTES`、`MAX_TOTAL_IMAGE_BYTES` 调整；编码后的完整模型请求限制为 45 MiB。任一附件不支持、过大或下载失败时，向模型明确传入材料缺口；只允许输出候选，禁止基于部分材料给出确定评级。
 
 模型接口参考：[JSON 输出](https://api-docs.deepseek.com/guides/json_mode/)、[图片输入](https://api-docs.deepseek.com/guides/vision/)。
 
@@ -53,7 +55,7 @@ GitHub Actions 在推送 `v*` 标签或手动触发时构建根目录 Dockerfile
 
 镜像地址为 `ghcr.io/ranjingya/design-task-dispatch:latest`，工作流使用仓库所有者作为 GHCR 命名空间；仓库应位于 `ranjingya` 名下，若使用其他组织则同步修改 Compose 镜像前缀。
 
-自动部署仅复制 Compose 文件。首次部署从镜像初始化 `config/fields.json` 和 `prompts/classify.md`，后续部署保留服务器已有配置。上线评级功能前，需将服务器结果字段映射设为实际字段名、同步完整提示词，并补齐规则表与模型环境变量。完成首次部署后，可手动执行：
+自动部署仅复制 Compose 文件。首次部署从镜像初始化 `config/fields.json` 和 `prompts/classify.md`，后续部署保留服务器已有配置。上线评级功能前，需同步 `config/fields.json`、`config/rule_fields.json` 和 `prompts/classify.md` 到服务器部署目录，并补齐规则表与模型环境变量。完成首次部署后，可手动执行：
 
 ```bash
 docker compose pull design-task-dispatch
@@ -61,7 +63,7 @@ docker compose up -d design-task-dispatch
 docker compose logs -f design-task-dispatch
 ```
 
-部署目录下的 `./config` 挂载到 `/app/config`，`./prompts` 挂载到 `/app/prompts`，均为容器内只读。字段配置在宿主机的 `config/fields.json` 中维护。
+部署目录下的 `./config` 挂载到 `/app/config`，`./prompts` 挂载到 `/app/prompts`，均为容器内只读。字段配置在宿主机的 `config/fields.json`、`config/rule_fields.json` 中维护。提示词在宿主机 `prompts/classify.md` 修改，下次模型调用生效，无需重建镜像。
 
 修改宿主机 `config/fields.json` 后，下一个新任务读取最新映射；处理中任务继续使用接收时的快照。JSON 无效时新请求返回 503，修复文件后重试即可，无需重建镜像。环境变量修改后执行 `docker compose up -d --force-recreate`。
 

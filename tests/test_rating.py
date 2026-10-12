@@ -12,15 +12,23 @@ from app.config import ROOT, Settings
 from app.dispatch import process_record
 from app.feishu import FeishuClient
 from app.materials import collect_images
+from app.rules import normalize_rules, select_department, format_result
 
-MAPPING = {"title": "标题", "description": "说明", "attachments": "材料",
-           "work_type": "类别", "rule_explanation": "结果"}
-RULES = [{"record_id": "recRule", "fields": {"工作": "测试规则"}}]
-OPTIONS = ["A-测试类型", "B-测试类型"]
+MAPPING = {"title": "标题", "description": "说明", "attachments": "材料", "platform": "平台",
+           "work_type": "类别", "level": "等级", "rule_explanation": "结果"}
+RULES = [{"record_id": "recRule", "work_type": "测试类型", "content": "测试工作", "departments": ["测试部"],
+          "default_level": "A", "adjustment": "", "assignment": "轮流"}]
+RAW_RULES = [{"record_id": "recRule", "fields": {"工作类型": "测试类型", "包含的工作": "测试工作",
+              "适用部门": "测试部", "默认ABC分类": "A基础重复", "分类调整说明": "", "匹配方式": "轮流"}}]
+OPTIONS = ["测试类型"]
 SCHEMA = [{"field_name": "类别", "type": 3, "property": {"options": [{"name": x} for x in OPTIONS]}},
+          {"field_name": "等级", "type": 3, "property": {"options": [{"name": x} for x in "ABC"]}},
           {"field_name": "结果", "type": 1}, {"field_name": "材料", "type": 17, "field_id": "fldImage"}]
-RATED = {"status": "rated", "level": "A", "work_type": "A-测试类型", "matched_rule_id": "recRule",
-         "reason": "符合规则", "missing_information": []}
+RATED = {"matched": True, "department": "测试部", "level": "A", "work_type": "测试类型", "rule_id": "recRule",
+         "reason": "符合规则", "missing_information": [], "candidates": [], "unmatched_reason": None}
+REVIEW = {"matched": False, "department": "测试部", "level": None, "work_type": None, "rule_id": None,
+          "reason": None, "missing_information": ["需补充用途"], "unmatched_reason": "用途不清晰",
+          "candidates": [{"rule_id": "recRule", "match_reason": "内容相符", "uncertainty": "用途未确定"}]}
 
 
 @pytest.fixture
@@ -35,21 +43,22 @@ def feishu(settings):
     client = Mock(spec=FeishuClient)
     client.settings = settings
     client.get_fields.return_value = SCHEMA
-    client.get_rules.return_value = RULES
-    client.get_record.return_value = {"标题": "测试", "说明": "测试需求"}
+    client.get_rules.return_value = RAW_RULES
+    client.get_record.return_value = {"标题": "测试", "说明": "测试需求", "平台": "测试部-平台"}
     return client
 
 
-def test_success_only_writes_two_fields(feishu, monkeypatch):
+def test_success_writes_three_fields(feishu, monkeypatch):
     classify = Mock(return_value=RATED)
     monkeypatch.setattr(AIClient, "classify", classify)
     feishu.get_record.return_value.update({"类别": "旧类别", "结果": "旧原因", "最终负责人": "某人"})
     process_record("recTest", MAPPING, feishu)
     fields = feishu.update_record.call_args.args[1]
-    assert set(fields) == {"类别", "结果"}
-    assert fields["类别"] == "A-测试类型"
+    assert set(fields) == {"类别", "等级", "结果"}
+    assert fields["类别"] == "测试类型"
     assert "recRule" in fields["结果"]
-    assert classify.call_args.args[0] == {"title": "测试", "description": "测试需求"}
+    assert classify.call_args.args[0]["platform"] == "测试部-平台"
+    assert fields["等级"] == "A"
 
 
 def test_missing_input_writes_review_without_ai(feishu, monkeypatch):
@@ -58,17 +67,17 @@ def test_missing_input_writes_review_without_ai(feishu, monkeypatch):
     feishu.get_record.return_value = {"标题": "测试"}
     process_record("recTest", MAPPING, feishu)
     classify.assert_not_called()
-    assert set(feishu.update_record.call_args.args[1]) == {"结果"}
+    assert feishu.update_record.call_args.args[1]["类别"] is None
     assert "说明" in feishu.update_record.call_args.args[1]["结果"]
 
 
-def test_unsupported_attachment_blocks_rating(feishu, monkeypatch):
-    classify = Mock()
+def test_unsupported_attachment_provides_candidates(feishu, monkeypatch):
+    classify = Mock(return_value=REVIEW)
     monkeypatch.setattr(AIClient, "classify", classify)
     feishu.get_record.return_value["材料"] = [{"file_token": "file", "type": "application/pdf"}]
     process_record("recTest", MAPPING, feishu)
-    classify.assert_not_called()
-    assert "附件 1" in feishu.update_record.call_args.args[1]["结果"]
+    assert "附件 1" in classify.call_args.args[0]["material_issues"][0]
+    assert "候选 1" in feishu.update_record.call_args.args[1]["结果"]
 
 
 def test_model_failure_is_retryable_and_does_not_write_type(feishu, monkeypatch):
@@ -87,19 +96,17 @@ def test_invalid_schema_never_writes(feishu):
 
 
 @pytest.mark.parametrize("change", [
-    {"work_type": "C-不存在"}, {"matched_rule_id": "recFake"}, {"level": "B"},
-    {"missing_information": ["缺信息"]}, {"reason": ""}, {"status": "needs_review"},
-    {"work_type": []}, {"matched_rule_id": []},
+    {"work_type": "C-不存在"}, {"rule_id": "recFake"}, {"level": "B"},
+    {"missing_information": ["缺信息"]}, {"reason": ""}, {"matched": False},
+    {"work_type": []}, {"rule_id": []},
 ])
 def test_invalid_model_result_rejected(change):
     with pytest.raises(ValueError):
-        validate_result(RATED | change, OPTIONS, RULES)
+        validate_result(RATED | change, OPTIONS, RULES, "测试部")
 
 
 def test_review_output_accepted():
-    result = RATED | {"status": "needs_review", "level": None, "work_type": None,
-                      "matched_rule_id": None, "missing_information": ["请补充"]}
-    assert validate_result(result, OPTIONS, RULES) == result
+    assert validate_result(REVIEW, OPTIONS, RULES, "测试部") == REVIEW
 
 
 def test_ai_retries_transient_failure_and_sends_json_images(settings, monkeypatch):
@@ -108,7 +115,7 @@ def test_ai_retries_transient_failure_and_sends_json_images(settings, monkeypatc
     monkeypatch.setattr("app.ai.httpx.post", post)
     monkeypatch.setattr("app.ai.time.sleep", Mock())
     images = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}]
-    result = AIClient(settings).classify({"title": "测试"}, RULES, OPTIONS, images)
+    result = AIClient(settings).classify({"title": "测试"}, RULES, OPTIONS, images, "测试部")
     assert result == RATED and post.call_count == 2
     payload = post.call_args.kwargs["json"]
     assert payload["messages"][1]["content"][1:] == images
@@ -141,7 +148,7 @@ def test_timeout_has_bounded_retry_and_no_secret(settings, monkeypatch):
 def test_pagination_and_repeated_cursor(settings, monkeypatch):
     client = FeishuClient(settings)
     monkeypatch.setattr(client, "_access_token", lambda: "token")
-    request = Mock(side_effect=[{"data": {"items": RULES, "has_more": True, "page_token": "next"}},
+    request = Mock(side_effect=[{"data": {"items": RAW_RULES, "has_more": True, "page_token": "next"}},
                                {"data": {"items": [{"record_id": "recTwo", "fields": {"x": "y"}}]}}])
     monkeypatch.setattr(client, "_request", request)
     assert len(client.get_rules()) == 2
@@ -180,13 +187,12 @@ def test_download_stream_limit_and_permission_context(settings, monkeypatch):
     assert extra["bitablePerm"]["attachments"] == {"fldImage": {"recTest": ["file"]}}
 
 
-def test_needs_review_preserves_existing_type(feishu, monkeypatch):
-    result = RATED | {"status": "needs_review", "level": None, "work_type": None,
-                      "matched_rule_id": None, "missing_information": ["选项未覆盖"]}
-    monkeypatch.setattr(AIClient, "classify", Mock(return_value=result))
+def test_needs_review_clears_stale_rating(feishu, monkeypatch):
+    monkeypatch.setattr(AIClient, "classify", Mock(return_value=REVIEW))
     process_record("recTest", MAPPING, feishu)
-    assert set(feishu.update_record.call_args.args[1]) == {"结果"}
-    assert "选项未覆盖" in feishu.update_record.call_args.args[1]["结果"]
+    updates = feishu.update_record.call_args.args[1]
+    assert updates["类别"] is None and updates["等级"] is None
+    assert "测试工作" in updates["结果"] and "用途未确定" in updates["结果"]
 
 
 def test_failed_write_does_not_report_success(feishu, monkeypatch):
@@ -206,3 +212,60 @@ def test_secret_not_in_settings_repr(settings):
 def test_invalid_runtime_config_rejected(settings, updates):
     with pytest.raises(ValueError):
         replace(settings, **updates).validate_ai()
+
+
+def test_department_filter_and_cross_department_rejection():
+    other = RULES[0] | {"record_id": "recOther", "departments": ["其他部"]}
+    assert select_department("测试部-平台", RULES + [other]) == ("测试部", RULES)
+    assert select_department("未知平台", RULES)[0] is None
+    with pytest.raises(ValueError, match="其他部门"):
+        validate_result(RATED | {"rule_id": "recOther"}, OPTIONS, RULES + [other], "测试部")
+    with pytest.raises(ValueError):
+        validate_result(RATED | {"department": None}, OPTIONS, RULES, None)
+    with pytest.raises(ValueError, match="其他部门"):
+        validate_result(REVIEW | {"candidates": [REVIEW["candidates"][0] | {"rule_id": "recOther"}]},
+                        OPTIONS, RULES + [other], "测试部")
+
+
+def test_rules_normalization_and_duplicate_names():
+    rules = normalize_rules(RAW_RULES, ROOT / "config/rule_fields.json")
+    assert rules == RULES
+    second = RULES[0] | {"record_id": "recSecond", "content": "另一工作", "assignment": "固定人员"}
+    output = format_result(RATED | {"rule_id": "recSecond"}, RULES + [second])
+    assert "另一工作" in output and "固定人员" in output and "recSecond" in output
+
+
+def test_material_failure_cannot_produce_rating(settings, monkeypatch):
+    response = httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(RATED)}}]})
+    monkeypatch.setattr("app.ai.httpx.post", Mock(return_value=response))
+    with pytest.raises(ValueError, match="材料"):
+        AIClient(settings).classify({"material_issues": ["无法读取"]}, RULES, OPTIONS, [], "测试部")
+
+
+def test_prompt_is_loaded_for_each_call(settings, monkeypatch, tmp_path):
+    prompt = tmp_path / 'classify.md'
+    settings = replace(settings, prompt_path=prompt)
+    response = httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(RATED)}}]})
+    post = Mock(return_value=response)
+    monkeypatch.setattr('app.ai.httpx.post', post)
+    client = AIClient(settings)
+    for content in ('第一份 JSON 提示词', '第二份 JSON 提示词'):
+        prompt.write_text(content)
+        client.classify({}, RULES, OPTIONS, [], '测试部')
+        assert post.call_args.kwargs['json']['messages'][0]['content'] == content
+
+
+def test_pipeline_only_sends_department_rules(feishu, monkeypatch):
+    other = {"record_id": "recOther", "fields": RAW_RULES[0]["fields"] | {"适用部门": "其他部"}}
+    feishu.get_rules.return_value = RAW_RULES + [other]
+    classify = Mock(return_value=RATED)
+    monkeypatch.setattr(AIClient, 'classify', classify)
+    process_record('recTest', MAPPING, feishu)
+    assert classify.call_args.args[1] == RULES
+    assert classify.call_args.args[4] == '测试部'
+
+
+def test_adjustment_allows_separate_level():
+    rules = [RULES[0] | {"adjustment": "重新设计可调B"}]
+    result = RATED | {"level": "B", "reason": "需要重新设计"}
+    assert validate_result(result, OPTIONS, rules, '测试部')['level'] == 'B'

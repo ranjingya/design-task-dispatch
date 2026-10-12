@@ -12,5 +12,6 @@
   "assignee": "最终负责人",
   "leader_confirmed": "组长确认",
   "assignee_confirmed": "负责人确认",
-  "completed_at": "实际完成时间"
+  "completed_at": "实际完成时间",
+  "level": "分类等级"
 }

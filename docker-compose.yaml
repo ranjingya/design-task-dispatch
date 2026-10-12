@@ -8,6 +8,8 @@ services:
     environment:
       TZ: Asia/Shanghai
       FIELD_MAPPING_PATH: /app/config/fields.json
+      RULE_FIELD_MAPPING_PATH: /app/config/rule_fields.json
+      CLASSIFY_PROMPT_PATH: /app/prompts/classify.md
     expose:
       - "8000"
     volumes:

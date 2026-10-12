@@ -108,6 +108,10 @@ jobs:
               docker run --rm --entrypoint cat "$image" /app/config/fields.json > config/fields.json.tmp
               mv config/fields.json.tmp config/fields.json
             fi
+            if [ ! -e config/rule_fields.json ]; then
+              docker run --rm --entrypoint cat "$image" /app/config/rule_fields.json > config/rule_fields.json.tmp
+              mv config/rule_fields.json.tmp config/rule_fields.json
+            fi
             if [ ! -e prompts/classify.md ]; then
               docker run --rm --entrypoint cat "$image" /app/prompts/classify.md > prompts/classify.md.tmp
               mv prompts/classify.md.tmp prompts/classify.md
