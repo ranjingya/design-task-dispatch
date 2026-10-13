@@ -28,11 +28,11 @@ def live_context():
 @pytest.mark.parametrize('case', CASES, ids=[f'scenario_{i + 1}' for i in range(len(CASES))])
 def test_real_model_matching(case, live_context):
     client, rules, options = live_context
-    department, eligible = select_department(case['platform'], rules)
+    department, eligible = select_department(case['department'], rules)
     # 使用实际联调时的标题与备注，验证任务管理标记不干扰业务判断。
     result = client.classify({'title': case.get('title_prefix', '') + case['description'],
                               'description': case['description'], 'notes': case.get('notes', ''),
-                              'platform': case['platform'], 'material_issues': []},
+                              'department': case['department'], 'platform': case['platform'], 'material_issues': []},
                              eligible, options, [], department)
     assert result['matched'] == (case['expected_type'] is not None), result
     assert result['work_type'] == case['expected_type'], result

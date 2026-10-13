@@ -2,7 +2,7 @@
   "title": "任务名称",
   "description": "需求说明",
   "submitter": "需求人",
-  "platform": "所属平台",
+  "platform": "平台",
   "deadline": "截止时间",
   "attachments": "附件",
   "notes": "备注",
@@ -13,5 +13,7 @@
   "leader_confirmed": "组长确认",
   "assignee_confirmed": "负责人确认",
   "completed_at": "实际完成时间",
-  "level": "分类等级"
+  "level": "分类等级",
+  "department": "部门",
+  "load_score": "任务负载分"
 }

@@ -65,7 +65,7 @@ class AIClient:
         self.settings = settings
 
     def classify(self, demand: dict, rules: list[dict], options: list[str], images: list[dict], department: str | None = None) -> dict:
-        """功能说明：调用模型并校验评级。参数 demand：需求文本字段；rules：规则快照；options：允许选项；images：图片消息片段；department：从提报平台确认的部门。返回值：校验后的评级结果。"""
+        """功能说明：调用模型并校验评级。参数 demand：需求文本字段；rules：规则快照；options：允许选项；images：图片消息片段；department：从需求部门字段确认的部门。返回值：校验后的评级结果。"""
         settings = self.settings
         settings.validate_ai()
         logger.info("加载评级提示词：%s", settings.prompt_path)

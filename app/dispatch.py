@@ -10,7 +10,7 @@ from app.ai import AIClient
 from app.materials import collect_images
 from app.config import Settings, load_fields
 from app.feishu import FeishuClient
-from app.rules import select_department, review, format_result
+from app.rules import select_department, review, format_result, load_score
 from app.rule_cache import load_daily_rules
 
 logger = logging.getLogger(__name__)
@@ -25,13 +25,20 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
         schema.get(name, {}).get("type") != 3 for name in (type_name, level_name)
     ):
         raise ValueError("匹配结果需为文本，工作类型和分类等级需为单选，请核对字段映射")
+    score_name = mapping.get("load_score")
+    if schema.get(score_name, {}).get("type") != 2:
+        raise ValueError("任务负载分需为数字字段，请核对字段映射")
+    if schema.get(mapping.get("department"), {}).get("type") != 3 or schema.get(
+        mapping.get("platform"), {}
+    ).get("type") != 1:
+        raise ValueError("部门需为单选，平台需为文本，请核对字段映射")
     try:
         feishu.settings.validate_ai()
         fields = feishu.get_record(record_id)
         demand = {key: fields.get(mapping[key]) for key in
-                  ("title", "description", "platform", "deadline", "notes") if key in mapping}
+                  ("title", "description", "department", "platform", "deadline", "notes") if key in mapping}
         rules = load_daily_rules(feishu)
-        department, eligible = select_department(demand.get("platform"), rules)
+        department, eligible = select_department(demand.get("department"), rules)
         options = [item["name"] for item in schema[type_name].get("property", {}).get("options", [])]
         levels = {item["name"] for item in schema[level_name].get("property", {}).get("options", [])}
         if not options or not {"A", "B", "C"} <= levels:
@@ -50,10 +57,18 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
             # 未读取的材料显式传入，让模型列出候选；程序禁止此时给出确定评级。
             demand["material_issues"] = issues
             result = AIClient(feishu.settings).classify(demand, eligible, options, images, department)
-        updates = {result_name: format_result(result, rules),
-                   type_name: result["work_type"], level_name: result["level"]}
+        score = None
+        explanation = format_result(result, rules)
+        if result["matched"]:
+            rule = next(r for r in rules if r["record_id"] == result["rule_id"])
+            score = load_score(rule.get("load_score"))
+            if score is None:
+                explanation += "\n负载分：规则分数缺失或无效，待补充后重新处理。"
+                logger.warning("命中规则缺少有效负载分：record_id=%s rule_id=%s", record_id, rule["record_id"])
+        updates = {result_name: explanation, type_name: result["work_type"],
+                   level_name: result["level"], score_name: score}
         feishu.update_record(record_id, updates)
-        logger.info("评级回写完成：record_id=%s matched=%s", record_id, result["matched"])
+        logger.info("评级回写完成：record_id=%s matched=%s load_score=%s", record_id, result["matched"], score)
     except Exception:
         logger.exception("评级流程失败：record_id=%s", record_id)
         try:

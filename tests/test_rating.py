@@ -15,13 +15,14 @@ from app.materials import collect_images
 from app.rules import normalize_rules, select_department, format_result
 
 MAPPING = {"title": "标题", "description": "说明", "attachments": "材料", "platform": "平台",
-           "work_type": "类别", "level": "等级", "rule_explanation": "结果"}
+           "department": "部门", "load_score": "分数", "work_type": "类别", "level": "等级", "rule_explanation": "结果"}
 RULES = [{"record_id": "recRule", "work_type": "测试类型", "content": "测试工作", "departments": ["测试部"],
-          "default_level": "A", "adjustment": "", "assignment": "轮流"}]
+          "default_level": "A", "adjustment": "", "assignment": "轮流", "load_score": 2}]
 RAW_RULES = [{"record_id": "recRule", "fields": {"工作类型": "测试类型", "包含的工作": "测试工作",
-              "适用部门": "测试部", "默认ABC分类": "A基础重复", "分类调整说明": "", "匹配方式": "轮流"}}]
+              "适用部门": "测试部", "默认ABC分类": "A基础重复", "分类调整说明": "", "匹配方式": "轮流", "人员负载分数": 2}}]
 OPTIONS = ["测试类型"]
-SCHEMA = [{"field_name": "类别", "type": 3, "property": {"options": [{"name": x} for x in OPTIONS]}},
+SCHEMA = [{"field_name": "部门", "type": 3}, {"field_name": "平台", "type": 1},
+          {"field_name": "分数", "type": 2}, {"field_name": "类别", "type": 3, "property": {"options": [{"name": x} for x in OPTIONS]}},
           {"field_name": "等级", "type": 3, "property": {"options": [{"name": x} for x in "ABC"]}},
           {"field_name": "结果", "type": 1}, {"field_name": "材料", "type": 17, "field_id": "fldImage"}]
 RATED = {"matched": True, "department": "测试部", "level": "A", "work_type": "测试类型", "rule_id": "recRule",
@@ -44,21 +45,22 @@ def feishu(settings):
     client.settings = settings
     client.get_fields.return_value = SCHEMA
     client.get_rules.return_value = RAW_RULES
-    client.get_record.return_value = {"标题": "测试", "说明": "测试需求", "平台": "测试部-平台"}
+    client.get_record.return_value = {"标题": "测试", "说明": "测试需求", "平台": "示例平台", "部门": "测试部"}
     return client
 
 
-def test_success_writes_three_fields(feishu, monkeypatch):
+def test_success_writes_rating_and_score(feishu, monkeypatch):
     classify = Mock(return_value=RATED)
     monkeypatch.setattr(AIClient, "classify", classify)
     feishu.get_record.return_value.update({"类别": "旧类别", "结果": "旧原因", "最终负责人": "某人"})
     process_record("recTest", MAPPING, feishu)
     fields = feishu.update_record.call_args.args[1]
-    assert set(fields) == {"类别", "等级", "结果"}
+    assert set(fields) == {"类别", "等级", "结果", "分数"}
     assert fields["类别"] == "测试类型"
     assert "recRule" in fields["结果"]
-    assert classify.call_args.args[0]["platform"] == "测试部-平台"
+    assert classify.call_args.args[0]["platform"] == "示例平台"
     assert fields["等级"] == "A"
+    assert fields["分数"] == 2
 
 
 def test_missing_input_writes_review_without_ai(feishu, monkeypatch):
@@ -216,7 +218,7 @@ def test_invalid_runtime_config_rejected(settings, updates):
 
 def test_department_filter_and_cross_department_rejection():
     other = RULES[0] | {"record_id": "recOther", "departments": ["其他部"]}
-    assert select_department("测试部-平台", RULES + [other]) == ("测试部", RULES)
+    assert select_department("测试部", RULES + [other]) == ("测试部", RULES)
     assert select_department("未知平台", RULES)[0] is None
     with pytest.raises(ValueError, match="其他部门"):
         validate_result(RATED | {"rule_id": "recOther"}, OPTIONS, RULES + [other], "测试部")
@@ -269,3 +271,77 @@ def test_adjustment_allows_separate_level():
     rules = [RULES[0] | {"adjustment": "重新设计可调B"}]
     result = RATED | {"level": "B", "reason": "需要重新设计"}
     assert validate_result(result, OPTIONS, rules, '测试部')['level'] == 'B'
+
+
+@pytest.mark.parametrize('departments', ['测试部、其他部', ['测试部', '其他部'],
+                                          [{'text': '测试部、'}, {'text': '其他部'}]])
+def test_multiselect_and_legacy_department_rules(departments):
+    raw = [{'record_id': 'recRule', 'fields': RAW_RULES[0]['fields'] |
+            {'工作类型': ['测试类型'], '适用部门': departments, '默认ABC分类': ['A']}}]
+    rules = normalize_rules(raw, ROOT / 'config/rule_fields.json')
+    assert rules[0]['departments'] == ['测试部', '其他部']
+    assert rules[0]['work_type'] == '测试类型'
+    assert select_department(['其他部'], rules) == ('其他部', rules)
+
+
+@pytest.mark.parametrize('value', [None, '', '测试部-平台', ['测试部', '其他部'], '不存在'])
+def test_department_requires_exact_single_option(value):
+    assert select_department(value, RULES)[0] is None
+
+
+def test_department_wins_over_platform(feishu, monkeypatch):
+    feishu.get_record.return_value['平台'] = '其他部-某平台'
+    classify = Mock(return_value=RATED)
+    monkeypatch.setattr(AIClient, 'classify', classify)
+    process_record('recTest', MAPPING, feishu)
+    assert classify.call_args.args[4] == '测试部'
+    assert classify.call_args.args[0]['department'] == '测试部'
+
+
+def test_duplicate_type_score_comes_from_exact_rule_and_not_level(feishu, monkeypatch):
+    second = {'record_id': 'recSecond', 'fields': RAW_RULES[0]['fields'] |
+              {'包含的工作': '另一工作', '人员负载分数': 7.5, '分类调整说明': '重新设计可调B'}}
+    feishu.get_rules.return_value = RAW_RULES + [second]
+    monkeypatch.setattr(AIClient, 'classify', Mock(return_value=RATED |
+                        {'rule_id': 'recSecond', 'level': 'B', 'load_score': 999}))
+    process_record('recTest', MAPPING, feishu)
+    assert feishu.update_record.call_args.args[1]['分数'] == 7.5
+    assert feishu.update_record.call_args.args[1]['等级'] == 'B'
+
+
+def test_unmatched_clears_previous_load_score(feishu, monkeypatch):
+    feishu.get_record.return_value['分数'] = 9
+    monkeypatch.setattr(AIClient, 'classify', Mock(return_value=REVIEW))
+    process_record('recTest', MAPPING, feishu)
+    assert feishu.update_record.call_args.args[1]['分数'] is None
+
+
+@pytest.mark.parametrize('score', [None, -1, True, '3', float('nan'), float('inf')])
+def test_invalid_rule_score_never_becomes_zero(feishu, monkeypatch, score):
+    feishu.get_rules.return_value = [{'record_id': 'recRule', 'fields':
+                                     RAW_RULES[0]['fields'] | {'人员负载分数': score}}]
+    monkeypatch.setattr(AIClient, 'classify', Mock(return_value=RATED))
+    process_record('recTest', MAPPING, feishu)
+    updates = feishu.update_record.call_args.args[1]
+    assert updates['类别'] == '测试类型'
+    assert updates['分数'] is None
+    assert '规则分数缺失或无效' in updates['结果']
+
+
+def test_zero_score_is_valid(feishu, monkeypatch):
+    feishu.get_rules.return_value = [{'record_id': 'recRule', 'fields':
+                                     RAW_RULES[0]['fields'] | {'人员负载分数': 0}}]
+    monkeypatch.setattr(AIClient, 'classify', Mock(return_value=RATED))
+    process_record('recTest', MAPPING, feishu)
+    assert feishu.update_record.call_args.args[1]['分数'] == 0
+
+
+@pytest.mark.parametrize('field,kind', [('分数', 19), ('部门', 1), ('平台', 3)])
+def test_changed_input_or_score_schema_fails_before_ai(feishu, monkeypatch, field, kind):
+    feishu.get_fields.return_value = [f | {'type': kind} if f['field_name'] == field else f for f in SCHEMA]
+    classify = Mock()
+    monkeypatch.setattr(AIClient, 'classify', classify)
+    with pytest.raises(ValueError):
+        process_record('recTest', MAPPING, feishu)
+    classify.assert_not_called()
+    feishu.update_record.assert_not_called()

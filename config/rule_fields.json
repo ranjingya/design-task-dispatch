@@ -4,5 +4,6 @@
   "departments": "适用部门",
   "default_level": "默认ABC分类",
   "adjustment": "分类调整说明",
-  "assignment": "匹配方式"
+  "assignment": "匹配方式",
+  "load_score": "人员负载分数"
 }

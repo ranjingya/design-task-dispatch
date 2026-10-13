@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import re
 from pathlib import Path
 
@@ -19,20 +20,37 @@ def plain(value) -> str:
     return ""
 
 
+def department_values(value) -> list[str]:
+    """拆分部门多选标签或文本，富文本片段按同一文本处理。"""
+    values = value if isinstance(value, list) and all(isinstance(x, str) for x in value) else [plain(value)]
+    return list(dict.fromkeys(part.strip() for item in values
+                             for part in re.split(r"[、,，;/；\n]+", item) if part.strip()))
+
+
+def load_score(value) -> int | float | None:
+    """校验规则分数；缺失、负数、布尔值或非有限数字返回空值。"""
+    if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
 def normalize_rules(records: list[dict], path: Path) -> list[dict]:
     """功能说明：按外部映射标准化规则。参数 records：飞书原始规则；path：规则字段映射路径。返回值：完整规则快照。"""
     logger.info("加载规则字段配置：%s", path)
     mapping = json.loads(path.read_text(encoding="utf-8"))
-    required = {"work_type", "content", "departments", "default_level", "adjustment", "assignment"}
+    required = {"work_type", "content", "departments", "default_level", "adjustment", "assignment", "load_score"}
     if not isinstance(mapping, dict) or not required <= mapping.keys() or any(
         not isinstance(mapping[k], str) or not mapping[k].strip() for k in required
     ):
         raise ValueError("规则字段映射不完整")
     rules = []
     for record in records:
-        rule = {key: plain(record["fields"].get(mapping[key])) for key in required}
+        rule = {key: plain(record["fields"].get(mapping[key])) for key in required - {"load_score"}}
         rule["record_id"] = record["record_id"]
-        rule["departments"] = [x.strip() for x in re.split(r"[、,，;/；\n]+", rule["departments"]) if x.strip()]
+        rule["departments"] = department_values(record["fields"].get(mapping["departments"]))
+        rule["load_score"] = load_score(record["fields"].get(mapping["load_score"]))
+        if rule["load_score"] is None:
+            logger.warning("规则负载分缺失或无效：rule_id=%s", rule["record_id"])
         match = re.match(r"^([ABC])", rule["default_level"])
         if not match or not rule["work_type"] or not rule["content"] or not rule["departments"]:
             raise ValueError(f"规则缺少类型、内容、部门或等级：{rule['record_id']}")
@@ -43,17 +61,16 @@ def normalize_rules(records: list[dict], path: Path) -> list[dict]:
     return rules
 
 
-def select_department(platform, rules: list[dict]) -> tuple[str | None, list[dict]]:
-    """功能说明：按平台中明确的部门筛选规则。参数 platform：提报平台；rules：完整规则。返回值：确认部门及候选范围。"""
-    platform = plain(platform)
+def select_department(value, rules: list[dict]) -> tuple[str | None, list[dict]]:
+    """功能说明：按需求部门精确筛选规则。参数 value：需求部门单选值；rules：完整规则。返回值：确认部门及候选范围；部门未知时返回完整候选范围。"""
+    selected = department_values(value)
     departments = {d for rule in rules for d in rule["departments"]}
-    matches = {d for d in departments if d in platform}
-    if len(matches) == 1:
-        department = matches.pop()
+    if len(selected) == 1 and selected[0] in departments:
+        department = selected[0]
         eligible = [r for r in rules if department in r["departments"]]
         logger.info("部门筛选完成：department=%s rule_count=%d", department, len(eligible))
         return department, eligible
-    logger.warning("提报平台无法唯一确定部门：matched_count=%d", len(matches))
+    logger.warning("需求部门缺失、无效或不是单一部门：value_count=%d", len(selected))
     return None, rules
 
 
