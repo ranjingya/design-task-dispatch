@@ -19,7 +19,7 @@ MAPPING = {"title": "标题", "description": "说明", "attachments": "材料", 
 RULES = [{"record_id": "recRule", "work_type": "测试类型", "content": "测试工作", "departments": ["测试部"],
           "default_level": "A", "adjustment": "", "assignment": "轮流", "load_score": 2}]
 RAW_RULES = [{"record_id": "recRule", "fields": {"工作类型": "测试类型", "包含的工作": "测试工作",
-              "适用部门": "测试部", "默认ABC分类": "A基础重复", "分类调整说明": "", "匹配方式": "轮流", "人员负载分数": 2}}]
+              "适用部门": "测试部", "默认ABC分类": "A基础重复", "分类调整说明": "", "推荐方式": "轮流", "人员负载分数": 2}}]
 OPTIONS = ["测试类型"]
 SCHEMA = [{"field_name": "部门", "type": 3}, {"field_name": "平台", "type": 1},
           {"field_name": "分数", "type": 2}, {"field_name": "类别", "type": 3, "property": {"options": [{"name": x} for x in OPTIONS]}},

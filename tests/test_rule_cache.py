@@ -18,7 +18,7 @@ def client(tmp_path):
     client.settings = settings
     client.get_rules.return_value = [{"record_id": "recOne", "fields": {
         "工作类型": "示例", "包含的工作": "制作示例素材", "适用部门": "测试部",
-        "默认ABC分类": "B常规设计", "分类调整说明": "", "匹配方式": "轮流", "人员负载分数": 3}}]
+        "默认ABC分类": "B常规设计", "分类调整说明": "", "推荐方式": "轮流", "人员负载分数": 3}}]
     return client
 
 
