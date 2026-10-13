@@ -354,3 +354,33 @@ def test_feishu_numeric_string_score(feishu, monkeypatch, raw, expected):
     monkeypatch.setattr(AIClient, 'classify', Mock(return_value=RATED))
     process_record('recTest', MAPPING, feishu)
     assert feishu.update_record.call_args.args[1]['分数'] == expected
+
+
+def test_recommendation_integrates_single_write(feishu, monkeypatch):
+    mapping = MAPPING | {'recommendation_result': '推荐结果', 'recommended_assignee': '推荐人',
+                         'assignee': '负责人', 'leader_confirmed': '确认', 'completed_at': '完成',
+                         'cancelled': '取消', 'is_test': '测试'}
+    feishu.get_fields.return_value = SCHEMA + [{'field_name': '推荐结果', 'type': 1}, {'field_name': '推荐人', 'type': 11}]
+    monkeypatch.setattr(AIClient, 'classify', Mock(return_value=RATED))
+    recommend = Mock(return_value=({'推荐结果': '依据', '推荐人': [{'id': 'a'}]}, None))
+    monkeypatch.setattr('app.dispatch.recommend', recommend)
+    process_record('recTest', mapping, feishu)
+    feishu.update_record.assert_called_once()
+    updates = feishu.update_record.call_args.args[1]
+    assert updates['分数'] == 2 and updates['推荐人'] == [{'id': 'a'}]
+    assert recommend.call_args.args[3]['record_id'] == 'recRule'
+
+    feishu.reset_mock()
+    feishu.get_record.side_effect = [{'标题': '测试', '说明': '需求', '部门': '测试部'}, {'确认': True}]
+    process_record('recTest', mapping, feishu)
+    feishu.update_record.assert_not_called()
+
+
+def test_recommendation_failure_preserves_rating_and_clears_old_recommendation(feishu, monkeypatch):
+    mapping = MAPPING | {'recommendation_result': '推荐结果', 'recommended_assignee': '推荐人'}
+    feishu.get_fields.return_value = SCHEMA + [{'field_name': '推荐结果', 'type': 1}, {'field_name': '推荐人', 'type': 11}]
+    monkeypatch.setattr(AIClient, 'classify', Mock(return_value=RATED))
+    monkeypatch.setattr('app.dispatch.recommend', Mock(side_effect=RuntimeError('来源不可读')))
+    process_record('recTest', mapping, feishu)
+    updates = feishu.update_record.call_args.args[1]
+    assert updates['分数'] == 2 and updates['推荐人'] == [] and '推荐失败' in updates['推荐结果']

@@ -15,5 +15,8 @@
   "completed_at": "实际完成时间",
   "level": "分类等级",
   "department": "部门",
-  "load_score": "任务负载分"
+  "load_score": "任务负载分",
+  "recommendation_result": "推荐结果",
+  "cancelled": "是否取消",
+  "is_test": "是否测试"
 }

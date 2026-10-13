@@ -71,9 +71,9 @@ class FeishuClient:
         self._request("PUT", self._record_path(record_id), json={"fields": fields},
                       headers={"Authorization": f"Bearer {self._access_token()}"})
 
-    def _list_all(self, table_id: str, resource: str) -> list[dict]:
-        """功能说明：完整读取分页资源。参数 table_id：表 ID；resource：fields 或 records。返回值：全部项目列表。"""
-        path = f"/bitable/v1/apps/{quote(self.settings.base_token, safe='')}/tables/{quote(table_id, safe='')}/{resource}"
+    def _list_all(self, table_id: str, resource: str, base_token: str | None = None) -> list[dict]:
+        """功能说明：完整读取分页资源。参数 table_id：表 ID；resource：fields 或 records；base_token：可选来源 Base。返回值：全部项目列表。"""
+        path = f"/bitable/v1/apps/{quote(base_token or self.settings.base_token, safe='')}/tables/{quote(table_id, safe='')}/{resource}"
         items, seen = [], set()
         params = {"page_size": 100}
         while True:
@@ -87,6 +87,12 @@ class FeishuClient:
                 raise RuntimeError("飞书分页游标异常，无法确认资源完整")
             seen.add(token)
             params["page_token"] = token
+
+    def get_records(self, table_id: str, base_token: str | None = None) -> list[dict]:
+        """功能说明：读取完整业务记录。参数 table_id：来源表；base_token：可选跨 Base 来源。返回值：含记录 ID 和字段的列表。"""
+        records = self._list_all(table_id, "records", base_token)
+        logger.info("业务记录加载完成：table_id=%s count=%d", table_id, len(records))
+        return records
 
     def get_fields(self) -> list[dict]:
         """读取需求表字段结构及单选选项。"""

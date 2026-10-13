@@ -12,12 +12,13 @@ from app.config import Settings, load_fields
 from app.feishu import FeishuClient
 from app.rules import select_department, review, format_result, load_score
 from app.rule_cache import load_daily_rules
+from app.recommendation import protected, recommend, save_rotation
 
 logger = logging.getLogger(__name__)
 
 
 def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient) -> None:
-    """功能说明：读取需求和规则、调用 AI 并回写结果。参数 record_id：记录 ID；mapping：本次字段快照；feishu：飞书客户端。返回值：无。"""
+    """功能说明：读取需求、调用 AI 评级、按规则推荐人员并回写结果。参数 record_id：记录 ID；mapping：本次字段快照；feishu：飞书客户端。返回值：无。"""
     schema = {item["field_name"]: item for item in feishu.get_fields()}
     result_name = mapping.get("rule_explanation")
     type_name, level_name = mapping.get("work_type"), mapping.get("level")
@@ -32,9 +33,16 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
         mapping.get("platform"), {}
     ).get("type") != 1:
         raise ValueError("部门需为单选，平台需为文本，请核对字段映射")
+    recommending = "recommendation_result" in mapping
+    if recommending and (schema.get(mapping['recommendation_result'], {}).get('type') != 1 or
+                         schema.get(mapping['recommended_assignee'], {}).get('type') != 11):
+        raise ValueError("推荐结果需为文本，系统推荐人需为人员字段")
     try:
         feishu.settings.validate_ai()
         fields = feishu.get_record(record_id)
+        if recommending and protected(fields, mapping):
+            logger.info("保留人工安排或已结束任务：record_id=%s", record_id)
+            return
         demand = {key: fields.get(mapping[key]) for key in
                   ("title", "description", "department", "platform", "deadline", "notes") if key in mapping}
         rules = load_daily_rules(feishu)
@@ -58,6 +66,7 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
             demand["material_issues"] = issues
             result = AIClient(feishu.settings).classify(demand, eligible, options, images, department)
         score = None
+        rule = None
         explanation = format_result(result, rules)
         if result["matched"]:
             rule = next(r for r in rules if r["record_id"] == result["rule_id"])
@@ -67,7 +76,24 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
                 logger.warning("命中规则缺少有效负载分：record_id=%s rule_id=%s", record_id, rule["record_id"])
         updates = {result_name: explanation, type_name: result["work_type"],
                    level_name: result["level"], score_name: score}
+        pending = None
+        if recommending:
+            try:
+                recommendation, pending = recommend(record_id, fields, demand, rule, mapping, feishu)
+                updates.update(recommendation)
+            except Exception:
+                logger.exception("人员推荐失败：record_id=%s", record_id)
+                updates.update({mapping['recommendation_result']: "推荐失败：资源读取或配置校验失败，请查看日志并重新触发。",
+                                mapping['recommended_assignee']: []})
+            # 模型运行期间可能有人确认，回写前再次检查人工安排。
+            if protected(feishu.get_record(record_id), mapping):
+                logger.info("回写前发现人工安排，保留当前结果：record_id=%s", record_id)
+                return
         feishu.update_record(record_id, updates)
+        try:
+            save_rotation(pending)
+        except Exception:
+            logger.exception("轮换位置保存失败，推荐已回写：record_id=%s", record_id)
         logger.info("评级回写完成：record_id=%s matched=%s load_score=%s", record_id, result["matched"], score)
     except Exception:
         logger.exception("评级流程失败：record_id=%s", record_id)
