@@ -28,11 +28,11 @@ def protected(fields, mapping):
 
 
 def workloads(records, mapping, members, exclude_id):
-    """功能说明：计算正式任务的当前负载。参数 records：完整任务；mapping：字段映射；members：人员 ID 集合；exclude_id：排除本次任务。返回值：各人分数、任务数及缺分记录。"""
+    """功能说明：计算未结束任务的当前负载。参数 records：完整任务；mapping：字段映射；members：人员 ID 集合；exclude_id：排除本次任务。返回值：各人分数、任务数及缺分记录。"""
     loads = {uid: {'score': 0, 'count': 0, 'missing': []} for uid in members}
     for record in records:
         f = record['fields']
-        if record['record_id'] == exclude_id or any(checked(f.get(mapping[k])) for k in ('cancelled', 'is_test')) or f.get(mapping['completed_at']):
+        if record['record_id'] == exclude_id or checked(f.get(mapping['cancelled'])) or f.get(mapping['completed_at']):
             continue
         key = 'assignee' if checked(f.get(mapping['leader_confirmed'])) else 'recommended_assignee'
         for uid in set(user_ids(f.get(mapping[key]))):
@@ -237,8 +237,8 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
     existing = user_ids(fields.get(person_field))
     winner = next((n for n in tied if names[n] in existing), tied[0])
     state[pool] = winner
-    # 测试需求不推进正式轮换。
-    pending = None if checked(fields.get(mapping['is_test'])) else (state_path, state)
+    logger.info('准备更新轮换位置：pool=%s winner=%s', pool, winner)
+    pending = (state_path, state)
     return answer(source, names[winner], pending, mode=display_method)
 
 

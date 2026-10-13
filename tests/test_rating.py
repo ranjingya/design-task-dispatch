@@ -368,7 +368,7 @@ def test_feishu_numeric_string_score(feishu, monkeypatch, raw, expected):
 def test_recommendation_integrates_single_write(feishu, monkeypatch):
     mapping = MAPPING | {'recommendation_result': '推荐结果', 'recommended_assignee': '推荐人',
                          'assignee': '负责人', 'leader_confirmed': '确认', 'completed_at': '完成',
-                         'cancelled': '取消', 'is_test': '测试'}
+                         'cancelled': '取消'}
     feishu.get_fields.return_value = SCHEMA + [{'field_name': '推荐结果', 'type': 1}, {'field_name': '推荐人', 'type': 11}]
     monkeypatch.setattr(AIClient, 'classify', Mock(return_value=RATED))
     recommend = Mock(return_value=({'推荐结果': '依据', '推荐人': [{'id': 'a'}]}, None))

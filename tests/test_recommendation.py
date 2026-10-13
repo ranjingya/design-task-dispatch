@@ -9,7 +9,7 @@ from app.config import ROOT
 from app.recommendation import workloads, product_owner, shop_owner, recommend, save_rotation, protected
 
 M = {'recommended_assignee': '推荐人', 'assignee': '负责人', 'leader_confirmed': '确认',
-     'completed_at': '完成', 'cancelled': '取消', 'is_test': '测试', 'load_score': '分数',
+     'completed_at': '完成', 'cancelled': '取消', 'load_score': '分数',
      'recommendation_result': '说明'}
 P = {'code_pattern': r'(?<![A-Z0-9])[A-Z]{1,5}[0-9]{4,12}(?![A-Z0-9])',
      'bundle_pattern': '拼款', 'old_pattern': '老款', 'platform_aliases': ['平台甲'],
@@ -24,12 +24,12 @@ def test_workloads_reservation_confirmation_and_exclusion():
     records = [row('self', 推荐人=[{'id': 'a'}], 分数=99),
                row('pending', 推荐人=[{'id': 'a'}], 分数='4'),
                row('confirmed', 推荐人=[{'id': 'a'}], 负责人=[{'id': 'b'}], 确认=True, 分数=7),
-               row('test', 推荐人=[{'id': 'a'}], 测试=True, 分数=99),
+               row('history', 标题='【历史验证】任务', 推荐人=[{'id': 'a'}], 分数=3),
                row('cancel', 推荐人=[{'id': 'a'}], 取消=True, 分数=99),
                row('complete', 负责人=[{'id': 'b'}], 确认=True, 完成=123, 分数=99),
                row('missing', 推荐人=[{'id': 'b'}])]
     result = workloads(records, M, ['a', 'b'], 'self')
-    assert result['a'] == {'score': 4, 'count': 1, 'missing': []}
+    assert result['a'] == {'score': 7, 'count': 2, 'missing': []}
     assert result['b'] == {'score': 7, 'count': 2, 'missing': ['missing']}
 
 
@@ -86,7 +86,7 @@ def test_rotation_persists_only_after_write_and_rerun_stable(client):
     save_rotation(pending)
     assert run(client)[0]['推荐人'] == [{'id': 'b'}]
     assert run(client, fields={'推荐人': [{'id': 'a'}]})[0]['推荐人'] == [{'id': 'a'}]
-    assert run(client, fields={'测试': True})[1] is None
+    assert run(client, fields={'标题': '【历史验证】任务'})[1] is not None
 
 
 def test_minimum_load_fixed_pool_and_missing_score(client):
@@ -183,9 +183,9 @@ def platform_client(client):
 
 @pytest.mark.parametrize('platform,expected', [('平台甲', 'a'), ('aa', 'a'), ('平台乙旗舰店', 'b'), ('bb', 'b')])
 def test_platform_owner_or_exclusion(platform_client, platform, expected):
-    updates, state = run(platform_client, '找对应人员', 'creative', {'title': 'XX12345', 'platform': platform}, {'测试': True})
+    updates, state = run(platform_client, '找对应人员', 'creative', {'title': 'XX12345', 'platform': platform})
     assert updates['推荐人'] == [{'id': expected}]
-    assert state is None
+    assert (state is None) == (expected == 'a')
     if expected == 'b':
         assert '排除原认领人甲' in updates['说明']
 
@@ -265,3 +265,19 @@ def test_missing_score_display(client):
     assert updates['说明'].split('\n\n') == ['人工分配', '未准确匹配规则，暂时无法推荐', '人员负载未比较', '本任务分数待确定']
     client.data['tasks'] = [row('missing', 推荐人=[{'id': 'a'}])]
     assert run(client)[0]['说明'].split('\n\n') == ['人工分配', '候选人员存在任务缺分，暂时无法比较负载', '甲 缺分 ｜ 乙 0', '本任务 4 分']
+
+
+def test_sequential_recommendations_reserve_load_and_rotate(client):
+    """连续需求回写后累计预占，并在同负载时推进轮换。"""
+    winners = []
+    for index in range(4):
+        updates, pending = run(client, fields={'标题': '【历史验证】任务'})
+        winner = updates['推荐人'][0]['id']
+        winners.append(winner)
+        client.data['tasks'].append(row(str(index), 推荐人=updates['推荐人'], 分数=4))
+        save_rotation(pending)
+    assert winners == ['a', 'b', 'a', 'b']
+    assert workloads(client.data['tasks'], M, ['a', 'b'], 'self') == {
+        'a': {'score': 8, 'count': 2, 'missing': []},
+        'b': {'score': 8, 'count': 2, 'missing': []},
+    }
