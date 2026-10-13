@@ -57,7 +57,7 @@ def test_success_writes_rating_and_score(feishu, monkeypatch):
     fields = feishu.update_record.call_args.args[1]
     assert set(fields) == {"类别", "等级", "结果", "分数"}
     assert fields["类别"] == "测试类型"
-    assert fields["结果"] == "已匹配｜测试类型\n对应：测试工作"
+    assert fields["结果"] == "已匹配｜测试类型\n\n对应：测试工作"
     assert classify.call_args.args[0]["platform"] == "示例平台"
     assert fields["等级"] == "A"
     assert fields["分数"] == 2
@@ -234,7 +234,7 @@ def test_rules_normalization_and_duplicate_names():
     assert rules == RULES
     second = RULES[0] | {"record_id": "recSecond", "content": "另一工作", "assignment": "固定人员"}
     output = format_result(RATED | {"rule_id": "recSecond"}, RULES + [second])
-    assert output == "已匹配｜测试类型\n对应：另一工作"
+    assert output == "已匹配｜测试类型\n\n对应：另一工作"
 
 
 def test_material_failure_cannot_produce_rating(settings, monkeypatch):
@@ -383,12 +383,12 @@ def test_recommendation_failure_preserves_rating_and_clears_old_recommendation(f
     monkeypatch.setattr('app.dispatch.recommend', Mock(side_effect=RuntimeError('来源不可读')))
     process_record('recTest', mapping, feishu)
     updates = feishu.update_record.call_args.args[1]
-    assert updates['分数'] == 2 and updates['推荐人'] == [] and updates['推荐结果'] == '人工分配\n资源读取或配置校验失败，请重试\n人员负载暂不可用\n本任务 2 分'
+    assert updates['分数'] == 2 and updates['推荐人'] == [] and updates['推荐结果'] == '人工分配\n\n资源读取或配置校验失败，请重试\n\n人员负载暂不可用\n\n本任务 2 分'
 
 
 def test_compact_match_adjustment_and_duplicate_candidates():
     output = format_result(RATED | {'level': 'B', 'reason': '需要重新设计\n版式'}, RULES)
-    assert output == '已匹配｜测试类型\n对应：测试工作\n调整为 B：需要重新设计 版式'
+    assert output == '已匹配｜测试类型\n\n对应：测试工作\n\n调整为 B：需要重新设计 版式'
     second = RULES[0] | {'record_id': 'second', 'content': '另一工作'}
     result = REVIEW | {'candidates': REVIEW['candidates'] + [REVIEW['candidates'][0] | {'rule_id': 'second'}]}
     output = format_result(result, RULES + [second])

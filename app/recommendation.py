@@ -108,7 +108,7 @@ def format_recommendation(method, reason, people, score):
     """功能说明：生成四行推荐文本。参数 method：推荐方式；reason：规则或异常原因；people：人员负载摘要；score：任务分数或空值。返回值：四行展示文本。"""
     compact = lambda value: ' '.join(str(value).split())
     last = f'本任务 {score:g} 分' if score is not None else '本任务分数待确定'
-    return '\n'.join([compact(method), compact(reason), compact(people), last])
+    return '\n\n'.join([compact(method), compact(reason), compact(people), last])
 
 
 def recommend(record_id, fields, demand, rule, mapping, feishu):

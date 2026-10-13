@@ -98,7 +98,7 @@ def format_result(result: dict, rules: list[dict]) -> str:
         lines = [f"已匹配｜{rule['work_type']}", '对应：' + compact(rule['content'])]
         if result['level'] != rule['default_level']:
             lines.append(f"调整为 {result['level']}：{compact(result['reason'])}")
-        return '\n'.join(lines)
+        return '\n\n'.join(lines)
     candidates = [by_id[c['rule_id']] for c in result['candidates']]
     labels = list(dict.fromkeys(r['work_type'] for r in candidates))
     # 同名候选用工作内容区分，记录 ID 留在日志中。
@@ -108,4 +108,4 @@ def format_result(result: dict, rules: list[dict]) -> str:
     if result['missing_information']:
         lines.append('需补充：' + '；'.join(compact(v) for v in result['missing_information']))
     logger.info('规则待确认：candidates=%s reason=%s', result['candidates'], result['unmatched_reason'])
-    return '\n'.join(lines)
+    return '\n\n'.join(lines)

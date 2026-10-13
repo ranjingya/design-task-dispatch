@@ -72,7 +72,7 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
             rule = next(r for r in rules if r["record_id"] == result["rule_id"])
             score = load_score(rule.get("load_score"))
             if score is None:
-                explanation += "\n负载分：规则分数缺失或无效，待补充后重新处理。"
+                explanation += "\n\n负载分：规则分数缺失或无效，待补充后重新处理。"
                 logger.warning("命中规则缺少有效负载分：record_id=%s rule_id=%s", record_id, rule["record_id"])
         updates = {result_name: explanation, type_name: result["work_type"],
                    level_name: result["level"], score_name: score}
