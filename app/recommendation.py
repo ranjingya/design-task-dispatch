@@ -70,7 +70,7 @@ def product_owner(demand, records, config):
     applicable = []
     for row in selected:
         limits = [p for p in config['platform_aliases'] if p in row[1]]
-        if limits and not any(p in platform for p in limits):
+        if limits and not any(platform_policy(platform, [{'aliases': [p] + config.get('platform_short_names', {}).get(p, [])}]) for p in limits):
             continue
         applicable.append(row)
     if not applicable:
@@ -86,6 +86,21 @@ def shop_owner(demand, shops):
     text = re.sub(r'\s+', '', ' '.join(plain(demand.get(k)) for k in ('platform', 'title', 'description', 'notes'))).casefold()
     matches = [s for s in shops if s['department'] == plain(demand.get('department')) and
                any(re.sub(r'\s+', '', a).casefold() in text for a in s['aliases'])]
+    return matches[0] if len(matches) == 1 else None
+
+
+def platform_policy(platform, policies):
+    """功能说明：按提报平台唯一匹配策略。参数 platform：平台文本；policies：平台别名与动作配置。返回值：唯一策略或空值。"""
+    text = plain(platform).casefold()
+    matches = []
+    for policy in policies:
+        for alias in policy['aliases']:
+            pattern = re.escape(alias.casefold())
+            if alias.isascii():
+                pattern = r'(?<![a-z0-9])' + pattern + r'(?![a-z0-9])'
+            if re.search(pattern, text):
+                matches.append(policy)
+                break
     return matches[0] if len(matches) == 1 else None
 
 
@@ -112,10 +127,10 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
     ):
         raise ValueError('推荐配置 members 必须为非空人员映射')
     if not isinstance(routes, dict) or any(
-        not isinstance(k, str) or not k.strip() or v not in ('product', 'shop')
+        not isinstance(k, str) or not k.strip() or v not in ('product', 'shop', 'product_platform')
         for k, v in routes.items()
     ):
-        raise ValueError('推荐配置 ownership_routes 必须映射到 product 或 shop')
+        raise ValueError('推荐配置 ownership_routes 必须映射到 product、shop 或 product_platform')
     if len(set(names.values())) != len(names) or set(config['rotation']) != set(names) or len(config['rotation']) != len(names):
         raise ValueError('人员映射或轮换顺序有重复、缺失')
     current = {uid for row in feishu.get_records(settings.members_table_id)
@@ -147,7 +162,21 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
             if any(n not in names for n in [owner] + backups):
                 return answer(source + '店铺团队存在未配置成员，需人工确认。')
             return answer(source + f"推荐：{owner}；按店铺主负责人归属。\n协作人员：{'、'.join(backups)}\n" + describe([owner] + backups), names[owner])
-        if route != 'product':
+        policy = None
+        if route == 'product_platform':
+            policies = config.get('product_platform_rules', {}).get(rule['record_id'], [])
+            if not isinstance(policies, list) or any(
+                not isinstance(p, dict) or p.get('action') not in ('owner', 'exclude_owner') or
+                not isinstance(p.get('aliases'), list) or not p['aliases'] or
+                any(not isinstance(a, str) or not a.strip() for a in p['aliases'])
+                for p in policies
+            ):
+                raise ValueError('product_platform_rules 平台策略配置无效')
+            policy = platform_policy(demand.get('platform'), policies)
+            if not policy:
+                return answer(source + '提报平台缺失、未配置或涉及多个平台，需人工分配。')
+            logger.info('平台推荐策略：record_id=%s action=%s', record_id, policy['action'])
+        if route not in ('product', 'product_platform'):
             return answer(source + '该规则尚未配置归属查询路径，需人工确认。')
         if not settings.product_base_token or not settings.product_table_id:
             raise ValueError('请配置 FEISHU_PRODUCT_BASE_TOKEN 和 FEISHU_PRODUCT_TABLE_ID')
@@ -158,13 +187,20 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
         if owner:
             if owner not in names:
                 return answer(source + reason + '\n认领人员不在当前成员名单，需人工分配。')
-            return answer(source + reason + f'\n推荐：{owner}；沿用商品归属。\n' + describe([owner]), names[owner])
-        if not fallback:
-            return answer(source + reason)
-        source += '明确为老款且未找到归属，按当前负载分配。\n'
+            if policy and policy['action'] == 'exclude_owner':
+                candidates = [n for n in candidates if n != owner]
+                source += reason + f'\n排除原认领人员：{owner}；其余成员按负载和轮换推荐。\n'
+            else:
+                return answer(source + reason + f'\n推荐：{owner}；沿用商品归属。\n' + describe([owner]), names[owner])
+        elif policy or not fallback:
+            return answer(source + reason + '\n需人工分配。')
+        else:
+            source += '明确为老款且未找到归属，按当前负载分配。\n'
     elif method != '轮流':
         return answer(source + '匹配方式为空或不受支持，需人工确认。')
 
+    if not candidates:
+        return answer(source + '没有可推荐成员，需人工分配。')
     if any(loads[names[n]]['missing'] for n in candidates):
         return answer(source + '候选负载存在缺分，暂不比较。\n' + describe(candidates))
     # 同分按既定顺序轮换；当前记录的预占已从比较中排除。

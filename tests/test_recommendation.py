@@ -165,3 +165,70 @@ def test_business_config_reloaded_each_task(client):
     config['rotation'] = ['乙', '甲']
     path.write_text(json.dumps(config))
     assert run(client)[0]['推荐人'] == [{'id': 'b'}]
+
+
+@pytest.fixture
+def platform_client(client):
+    path = client.settings.fields_path.parent / 'recommendation.json'
+    config = json.loads(path.read_text())
+    config['ownership_routes']['creative'] = 'product_platform'
+    config['product_platform_rules'] = {'creative': [
+        {'aliases': ['平台甲', 'AA'], 'action': 'owner'},
+        {'aliases': ['平台乙', 'BB'], 'action': 'exclude_owner'}]}
+    config['product']['platform_short_names'] = {'平台甲': ['AA']}
+    path.write_text(json.dumps(config))
+    client.data['products'] = [row('p', 商品='XX12345', 认领='甲')]
+    return client
+
+
+@pytest.mark.parametrize('platform,expected', [('平台甲', 'a'), ('aa', 'a'), ('平台乙旗舰店', 'b'), ('bb', 'b')])
+def test_platform_owner_or_exclusion(platform_client, platform, expected):
+    updates, state = run(platform_client, '找对应人员', 'creative', {'title': 'XX12345', 'platform': platform}, {'测试': True})
+    assert updates['推荐人'] == [{'id': expected}]
+    assert state is None
+    if expected == 'b':
+        assert '排除原认领人员：甲' in updates['说明']
+
+
+@pytest.mark.parametrize('platform', ['', '未知平台', '平台甲、平台乙', 'aabb'])
+def test_platform_unclear_stays_manual(platform_client, platform):
+    assert run(platform_client, '找对应人员', 'creative', {'title': 'XX12345', 'platform': platform})[0]['推荐人'] == []
+
+
+@pytest.mark.parametrize('owner', ['退组人员', '未配置', ''])
+@pytest.mark.parametrize('platform', ['平台甲', '平台乙'])
+def test_platform_invalid_owner_stays_manual(platform_client, owner, platform):
+    platform_client.data['products'][0]['fields']['认领'] = owner
+    assert run(platform_client, '找对应人员', 'creative', {'title': 'XX12345', 'platform': platform})[0]['推荐人'] == []
+
+
+def test_platform_old_product_does_not_fallback(platform_client):
+    assert run(platform_client, '找对应人员', 'creative', {'title': '老款 XX99999', 'platform': '平台乙'})[0]['推荐人'] == []
+
+
+def test_excluded_owner_missing_load_is_not_candidate(platform_client):
+    platform_client.data['tasks'] = [row('missing', 推荐人=[{'id': 'a'}])]
+    assert run(platform_client, '找对应人员', 'creative', {'title': 'XX12345', 'platform': '平台乙'})[0]['推荐人'] == [{'id': 'b'}]
+    platform_client.data['tasks'].append(row('candidate-missing', 推荐人=[{'id': 'b'}]))
+    assert run(platform_client, '找对应人员', 'creative', {'title': 'XX12345', 'platform': '平台乙'})[0]['推荐人'] == []
+
+
+def test_platform_alias_applies_to_product_limits(platform_client):
+    platform_client.data['products'] = [row('p', 商品='XX12345+XX12346 平台甲拼款', 认领='甲')]
+    assert run(platform_client, '找对应人员', 'creative', {'title': 'XX12345+XX12346', 'platform': 'AA'})[0]['推荐人'] == [{'id': 'a'}]
+
+
+def test_platform_exclusion_load_priority_and_rotation(platform_client):
+    path = platform_client.settings.fields_path.parent / 'recommendation.json'
+    config = json.loads(path.read_text())
+    config['members']['丙'] = 'c'
+    config['rotation'].append('丙')
+    path.write_text(json.dumps(config))
+    platform_client.data['members'].append(row('c', 人员=[{'id': 'c'}]))
+    demand = {'title': 'XX12345', 'platform': '平台乙'}
+    first, state = run(platform_client, '找对应人员', 'creative', demand)
+    assert first['推荐人'] == [{'id': 'b'}]
+    save_rotation(state)
+    assert run(platform_client, '找对应人员', 'creative', demand)[0]['推荐人'] == [{'id': 'c'}]
+    platform_client.data['tasks'] = [row('busy', 推荐人=[{'id': 'c'}], 分数=10)]
+    assert run(platform_client, '找对应人员', 'creative', demand)[0]['推荐人'] == [{'id': 'b'}]

@@ -19,7 +19,15 @@
     "platform_aliases": [
       "京东自营",
       "拼多多"
-    ]
+    ],
+    "platform_short_names": {
+      "拼多多": [
+        "PDD"
+      ],
+      "京东自营": [
+        "JD自营"
+      ]
+    }
   },
   "shops": [
     {
@@ -137,6 +145,25 @@
     "recvxqpt8WdeFd": "shop",
     "recvxx4FCfjo6R": "shop",
     "recvxP8CBq6fL9": "shop",
-    "recvxP92xao6zT": "shop"
+    "recvxP92xao6zT": "shop",
+    "recvxU9Q4iyg7t": "product_platform"
+  },
+  "product_platform_rules": {
+    "recvxU9Q4iyg7t": [
+      {
+        "aliases": [
+          "拼多多",
+          "PDD"
+        ],
+        "action": "exclude_owner"
+      },
+      {
+        "aliases": [
+          "京东",
+          "JD"
+        ],
+        "action": "owner"
+      }
+    ]
   }
 }
