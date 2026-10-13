@@ -23,6 +23,11 @@ class Settings:
     webhook_token: str = field(repr=False)
     fields_path: Path
     rules_table_id: str = ""
+    members_table_id: str = ""
+    product_base_token: str = ""
+    product_table_id: str = ""
+    member_ids: dict[str, str] = field(default_factory=dict)
+    ownership_routes: dict[str, str] = field(default_factory=dict)
     ai_base_url: str = "https://api.deepseek.com"
     ai_key: str = field(default="", repr=False)
     ai_model: str = ""
@@ -51,6 +56,11 @@ class Settings:
         return cls(
             *(values[name] for name in names), fields_path=path,
             rules_table_id=os.getenv("FEISHU_RULES_TABLE_ID", "").strip(),
+            members_table_id=os.getenv("FEISHU_MEMBERS_TABLE_ID", "").strip(),
+            product_base_token=os.getenv("FEISHU_PRODUCT_BASE_TOKEN", "").strip(),
+            product_table_id=os.getenv("FEISHU_PRODUCT_TABLE_ID", "").strip(),
+            member_ids=load_env_mapping("FEISHU_MEMBER_IDS_JSON"),
+            ownership_routes=load_env_mapping("FEISHU_OWNERSHIP_ROUTES_JSON"),
             ai_base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip().rstrip("/"),
             ai_key=os.getenv("DEEPSEEK_API_KEY", "").strip(),
             ai_model=os.getenv("DEEPSEEK_MODEL", "").strip(),
@@ -95,3 +105,15 @@ def load_fields(path: Path) -> dict[str, str]:
     if len(set(mapping.values())) != len(mapping):
         raise ValueError("字段映射不能重复引用同一个飞书字段")
     return mapping
+
+
+def load_env_mapping(name: str) -> dict[str, str]:
+    """功能说明：读取环境变量中的映射。参数 name：环境变量名称。返回值：非空字符串键值映射，未设置时为空字典。"""
+    try:
+        value = json.loads(os.getenv(name, "{}"))
+    except ValueError:
+        raise ValueError(f"{name} 必须是合法 JSON 对象") from None
+    if not isinstance(value, dict) or any(not isinstance(k, str) or not k.strip() or
+                                          not isinstance(v, str) or not v.strip() for k, v in value.items()):
+        raise ValueError(f"{name} 必须是字符串键值映射")
+    return value

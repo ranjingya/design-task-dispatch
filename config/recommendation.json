@@ -1,13 +1,5 @@
 {
-  "member_table": "tbl7e0QzzJBDL8uS",
   "member_field": "人员",
-  "members": {
-    "蛋糕": "ou_374ce703f935fa872095a345e4cbf990",
-    "饭团": "ou_f2bd3787e17caaf0fbcd5bd7a6204ec4",
-    "青提": "ou_96b223b78ee01eadca2e8308e922f6d4",
-    "软糖": "ou_ebc03a71dbdb474115ec23e1a4960878",
-    "塔可": "ou_c61e7ba7525109b48198b002cfe640eb"
-  },
   "rotation": [
     "蛋糕",
     "饭团",
@@ -18,14 +10,7 @@
   "excluded_owners": [
     "花菜"
   ],
-  "ownership_routes": {
-    "recvxqpt8WEp0a": "product",
-    "recvxqpt8WdeFd": "shop",
-    "recvxx4FCfjo6R": "shop"
-  },
   "product": {
-    "base_token": "BAyVbMM85amdaUsdwmdcxvSEnXb",
-    "table_id": "tblSmrB9qlCW9qEK",
     "title_field": "货号+品名",
     "owner_field": "认领人员",
     "code_pattern": "(?<![A-Z0-9])[A-Z]{1,5}[0-9]{4,12}(?![A-Z0-9])",

@@ -61,9 +61,16 @@ def client(tmp_path):
               'ownership_routes': {'product': 'product', 'shop': 'shop'},
               'product': P | {'base_token': 'external', 'table_id': 'products'},
               'shops': [{'department': '部门甲', 'aliases': ['店铺一'], 'primary': '甲', 'backup': ['乙']}]}
+    member_ids = config.pop('members')
+    member_table = config.pop('member_table')
+    routes = config.pop('ownership_routes')
+    product_base = config['product'].pop('base_token')
+    product_table = config['product'].pop('table_id')
     (tmp_path / 'recommendation.json').write_text(json.dumps(config))
     f = Mock()
-    f.settings = SimpleNamespace(fields_path=tmp_path / 'fields.json', rules_cache_path=tmp_path / 'cache/rules.json', table_id='tasks')
+    f.settings = SimpleNamespace(fields_path=tmp_path / 'fields.json', rules_cache_path=tmp_path / 'cache/rules.json', table_id='tasks',
+                                 members_table_id=member_table, member_ids=member_ids, ownership_routes=routes,
+                                 product_base_token=product_base, product_table_id=product_table)
     f.data = {'members': [row('a', 人员=[{'id': 'a'}]), row('b', 人员=[{'id': 'b'}])], 'tasks': [], 'products': []}
     f.get_records.side_effect = lambda table, *args: f.data[table]
     return f
@@ -117,6 +124,42 @@ def test_protected_records(fields):
 def test_configuration_routes_and_members_consistent():
     config = json.loads((ROOT / 'config/recommendation.json').read_text())
     assert len(config['shops']) == 10
-    assert len(config['rotation']) == len(set(config['rotation'])) == len(config['members'])
+    assert len(config['rotation']) == len(set(config['rotation']))
+    assert 'members' not in config and 'member_table' not in config and 'ownership_routes' not in config
+    assert 'base_token' not in config['product'] and 'table_id' not in config['product']
     for shop in config['shops']:
-        assert all(n in config['members'] for n in [shop['primary']] + shop['backup'])
+        assert all(n in config['rotation'] for n in [shop['primary']] + shop['backup'])
+
+
+@pytest.mark.parametrize('name', ['members_table_id', 'member_ids', 'product_base_token', 'product_table_id'])
+def test_missing_resource_config_does_not_recommend(client, name):
+    setattr(client.settings, name, {} if name == 'member_ids' else '')
+    with pytest.raises(ValueError, match='请配置'):
+        run(client, '找对应人员', 'product', {'title': 'XX12345'})
+
+
+def test_resource_ids_only_come_from_settings(client):
+    client.settings.members_table_id = 'replacement-members'
+    client.settings.product_base_token = 'replacement-base'
+    client.settings.product_table_id = 'replacement-products'
+    client.data['replacement-members'] = client.data.pop('members')
+    client.data['replacement-products'] = [row('p', 商品='XX12345', 认领='甲')]
+    assert run(client, '找对应人员', 'product', {'title': 'XX12345'})[0]['推荐人'] == [{'id': 'a'}]
+    client.get_records.assert_any_call('replacement-members')
+    client.get_records.assert_any_call('replacement-products', 'replacement-base')
+
+
+@pytest.mark.parametrize('raw', ['broken', '[]', '{"a":null}', '{"a":1}', '{"":"x"}'])
+def test_bad_env_mapping_rejected_without_exposing_value(monkeypatch, raw):
+    from app.config import load_env_mapping
+    monkeypatch.setenv('FEISHU_MEMBER_IDS_JSON', raw)
+    with pytest.raises(ValueError, match='FEISHU_MEMBER_IDS_JSON'):
+        load_env_mapping('FEISHU_MEMBER_IDS_JSON')
+
+
+def test_env_mapping_loads_without_hardcoded_defaults(monkeypatch):
+    from app.config import load_env_mapping
+    monkeypatch.delenv('FEISHU_MEMBER_IDS_JSON', raising=False)
+    assert load_env_mapping('FEISHU_MEMBER_IDS_JSON') == {}
+    monkeypatch.setenv('FEISHU_MEMBER_IDS_JSON', '{"甲":"example-user"}')
+    assert load_env_mapping('FEISHU_MEMBER_IDS_JSON') == {'甲': 'example-user'}

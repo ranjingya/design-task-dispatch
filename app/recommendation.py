@@ -101,10 +101,13 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
     path = feishu.settings.fields_path.parent / 'recommendation.json'
     logger.info('加载人员推荐配置：%s', path)
     config = json.loads(path.read_text(encoding='utf-8'))
-    names = config['members']
+    settings = feishu.settings
+    if not settings.members_table_id or not settings.member_ids:
+        raise ValueError('请配置 FEISHU_MEMBERS_TABLE_ID 和 FEISHU_MEMBER_IDS_JSON')
+    names = settings.member_ids
     if len(set(names.values())) != len(names) or set(config['rotation']) != set(names) or len(config['rotation']) != len(names):
         raise ValueError('人员映射或轮换顺序有重复、缺失')
-    current = {uid for row in feishu.get_records(config['member_table'])
+    current = {uid for row in feishu.get_records(settings.members_table_id)
                for uid in user_ids(row['fields'].get(config['member_field']))}
     if set(names.values()) != current:
         raise ValueError('成员负荷表与推荐人员配置不一致')
@@ -124,7 +127,7 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
         if not candidates or len(set(candidates)) != len(candidates) or any(n not in names for n in candidates):
             return answer(source + '固定人员名单缺失或包含未配置成员，需人工确认。')
     elif method == '找对应人员':
-        route = config['ownership_routes'].get(rule['record_id'])
+        route = settings.ownership_routes.get(rule['record_id'])
         if route == 'shop':
             shop = shop_owner(demand, config['shops'])
             if not shop:
@@ -135,8 +138,10 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
             return answer(source + f"推荐：{owner}；按店铺主负责人归属。\n协作人员：{'、'.join(backups)}\n" + describe([owner] + backups), names[owner])
         if route != 'product':
             return answer(source + '该规则尚未配置归属查询路径，需人工确认。')
+        if not settings.product_base_token or not settings.product_table_id:
+            raise ValueError('请配置 FEISHU_PRODUCT_BASE_TOKEN 和 FEISHU_PRODUCT_TABLE_ID')
         p = config['product']
-        owner, reason, fallback = product_owner(demand, feishu.get_records(p['table_id'], p['base_token']), p)
+        owner, reason, fallback = product_owner(demand, feishu.get_records(settings.product_table_id, settings.product_base_token), p)
         if owner in config['excluded_owners']:
             return answer(source + reason + f'\n原认领人员{owner}已不属于当前美工团队，需人工分配。')
         if owner:
