@@ -104,15 +104,27 @@ def platform_policy(platform, policies):
     return matches[0] if len(matches) == 1 else None
 
 
+def format_recommendation(method, reason, people, score):
+    """功能说明：生成四行推荐文本。参数 method：推荐方式；reason：规则或异常原因；people：人员负载摘要；score：任务分数或空值。返回值：四行展示文本。"""
+    compact = lambda value: ' '.join(str(value).split())
+    last = f'本任务 {score:g} 分' if score is not None else '本任务分数待确定'
+    return '\n'.join([compact(method), compact(reason), compact(people), last])
+
+
 def recommend(record_id, fields, demand, rule, mapping, feishu):
     """功能说明：生成推荐和待提交的轮换状态。参数 record_id：当前记录；fields：当前字段；demand：需求；rule：命中规则或空；mapping：字段映射；feishu：资源客户端。返回值：字段更新与可选轮换状态。"""
     result_field, person_field = mapping['recommendation_result'], mapping['recommended_assignee']
-    def answer(reason, uid=None, state=None):
-        logger.info('人员推荐完成：record_id=%s recommended=%s', record_id, bool(uid))
-        return {result_field: reason, person_field: [{'id': uid}] if uid else []}, state
+    score = load_score(rule.get('load_score')) if rule else None
+    names, loads, candidates = {}, {}, []
 
-    if not rule or load_score(rule.get('load_score')) is None:
-        return answer('暂未推荐：规则未准确匹配或任务负载分无效。')
+    def answer(reason, uid=None, state=None, mode='人工分配', people=None):
+        logger.info('人员推荐完成：record_id=%s recommended=%s reason=%s', record_id, bool(uid), reason)
+        summary = people if people is not None else (describe(candidates) if loads else '人员负载未比较')
+        text = format_recommendation(mode, reason, summary, score)
+        return {result_field: text, person_field: [{'id': uid}] if uid else []}, state
+
+    if not rule or score is None:
+        return answer('未准确匹配规则，暂时无法推荐' if not rule else '规则负载分缺失或无效，请补充分数')
     path = feishu.settings.fields_path.parent / 'recommendation.json'
     logger.info('加载人员推荐配置：%s', path)
     config = json.loads(path.read_text(encoding='utf-8'))
@@ -139,29 +151,33 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
         raise ValueError('成员负荷表与推荐人员配置不一致')
     loads = workloads(feishu.get_records(feishu.settings.table_id), mapping, current, record_id)
     def describe(candidates):
-        return '；'.join(f"{n}：" + ('缺分（' + '、'.join(loads[names[n]]['missing']) + '）' if loads[names[n]]['missing'] else
-                                    f"{loads[names[n]]['score']:g} 分／{loads[names[n]]['count']} 单") for n in candidates)
+        return ' ｜ '.join(f"{n} " + ('缺分' if loads[names[n]]['missing'] else
+                                      f"{loads[names[n]]['score']:g}") for n in candidates)
 
     method = rule.get('assignment', '')
     candidates = list(config['rotation'])
-    source = f"分配方式：{method}\n"
+    source = '全体美工负载最低优先，同分轮流'
+    display_method = '轮流'
     if method == '人工分配':
-        return answer(source + '由组长确定负责人。候选负载参考：' + describe(candidates))
+        return answer('该类任务由组长结合人员能力和负载安排')
     if method.startswith('固定人员'):
         match = re.fullmatch(r'固定人员[（(](.+)[）)]', method)
         candidates = re.split(r'[\s、,，]+', match[1].strip()) if match else []
         if not candidates or len(set(candidates)) != len(candidates) or any(n not in names for n in candidates):
-            return answer(source + '固定人员名单缺失或包含未配置成员，需人工确认。')
+            return answer('固定人员名单缺失或包含未配置成员，需人工确认', people=describe(list(config['rotation'])))
+        source = '指定人员负载最低优先，同分轮流'
+        display_method = '固定人员'
     elif method == '找对应人员':
         route = routes.get(rule['record_id'])
         if route == 'shop':
             shop = shop_owner(demand, config['shops'])
             if not shop:
-                return answer(source + '部门和店铺未能唯一对应，请补充具体店铺名称。')
+                return answer('未能唯一确定店铺，请补充具体店铺名称')
             owner, backups = shop['primary'], shop['backup']
             if any(n not in names for n in [owner] + backups):
-                return answer(source + '店铺团队存在未配置成员，需人工确认。')
-            return answer(source + f"推荐：{owner}；按店铺主负责人归属。\n协作人员：{'、'.join(backups)}\n" + describe([owner] + backups), names[owner])
+                return answer('店铺团队存在未配置成员，需人工确认')
+            return answer(f"{shop['aliases'][0]}，主负责人优先，备选供组长调整", names[owner], mode='对应人员',
+                          people=describe([owner]) + (' ｜ 备选：' + describe(backups) if backups else ''))
         policy = None
         if route == 'product_platform':
             policies = config.get('product_platform_rules', {}).get(rule['record_id'], [])
@@ -174,35 +190,39 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
                 raise ValueError('product_platform_rules 平台策略配置无效')
             policy = platform_policy(demand.get('platform'), policies)
             if not policy:
-                return answer(source + '提报平台缺失、未配置或涉及多个平台，需人工分配。')
+                return answer('未能唯一确定平台，请补充明确的平台信息')
             logger.info('平台推荐策略：record_id=%s action=%s', record_id, policy['action'])
         if route not in ('product', 'product_platform'):
-            return answer(source + '该规则尚未配置归属查询路径，需人工确认。')
+            return answer('该规则尚未配置归属查询路径，需人工确认')
         if not settings.product_base_token or not settings.product_table_id:
             raise ValueError('请配置 FEISHU_PRODUCT_BASE_TOKEN 和 FEISHU_PRODUCT_TABLE_ID')
         p = config['product']
         owner, reason, fallback = product_owner(demand, feishu.get_records(settings.product_table_id, settings.product_base_token), p)
+        logger.info('商品归属查询：record_id=%s detail=%s', record_id, reason)
         if owner in config['excluded_owners']:
-            return answer(source + reason + f'\n原认领人员{owner}已不属于当前美工团队，需人工分配。')
+            return answer(f'原认领人{owner}不在美工名单，由组长安排')
         if owner:
             if owner not in names:
-                return answer(source + reason + '\n认领人员不在当前成员名单，需人工分配。')
+                return answer(f'原认领人{owner}不在美工名单，由组长安排')
             if policy and policy['action'] == 'exclude_owner':
                 candidates = [n for n in candidates if n != owner]
-                source += reason + f'\n排除原认领人员：{owner}；其余成员按负载和轮换推荐。\n'
+                source = f'排除原认领人{owner}，负载最低优先，同分轮流'
             else:
-                return answer(source + reason + f'\n推荐：{owner}；沿用商品归属。\n' + describe([owner]), names[owner])
+                text = ' '.join(plain(demand.get(k)) for k in ('title', 'description', 'platform', 'notes'))
+                codes = '、'.join(dict.fromkeys(re.findall(p['code_pattern'], text.upper())))
+                return answer(f"{plain(demand.get('platform'))} {codes}，沿用数据包认领人", names[owner],
+                              mode='对应人员', people=describe([owner]))
         elif policy or not fallback:
-            return answer(source + reason + '\n需人工分配。')
+            return answer(reason)
         else:
-            source += '明确为老款且未找到归属，按当前负载分配。\n'
+            source = '老款未找到归属，负载最低优先，同分轮流'
     elif method != '轮流':
-        return answer(source + '匹配方式为空或不受支持，需人工确认。')
+        return answer('推荐方式为空或不受支持，需人工确认')
 
     if not candidates:
-        return answer(source + '没有可推荐成员，需人工分配。')
+        return answer('没有可推荐成员，需人工分配', people='暂无候选人员')
     if any(loads[names[n]]['missing'] for n in candidates):
-        return answer(source + '候选负载存在缺分，暂不比较。\n' + describe(candidates))
+        return answer('候选人员存在任务缺分，暂时无法比较负载')
     # 同分按既定顺序轮换；当前记录的预占已从比较中排除。
     minimum = min(loads[names[n]]['score'] for n in candidates)
     tied = [n for n in config['rotation'] if n in candidates and loads[names[n]]['score'] == minimum]
@@ -219,8 +239,8 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
     state[pool] = winner
     # 测试需求不推进正式轮换。
     pending = None if checked(fields.get(mapping['is_test'])) else (state_path, state)
-    return answer(source + f'推荐：{winner}\n候选负载：' + describe(candidates) +
-                  f"\n本任务：{rule['load_score']:g} 分；推荐后：{minimum + rule['load_score']:g} 分。\n依据：负载最低，同分按顺序轮换。", names[winner], pending)
+    return answer(source, names[winner], pending, mode=display_method)
+
 
 
 def save_rotation(pending):

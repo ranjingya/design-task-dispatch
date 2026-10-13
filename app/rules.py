@@ -91,20 +91,21 @@ def format_result(result: dict, rules: list[dict]) -> str:
     """功能说明：生成标注具体规则的回写文本。参数 result：校验后结果；rules：本次规则快照。返回值：可读匹配说明。"""
     by_id = {r["record_id"]: r for r in rules}
 
-    def describe(rule):
-        return (f"规则：{rule['work_type']}（{rule['record_id']}）\n"
-                f"规则内容：{rule['content']}\n适用部门：{'、'.join(rule['departments'])}\n"
-                f"分配方式：{rule['assignment']}")
-
-    if result["matched"]:
-        return ("准确匹配\n" + describe(by_id[result["rule_id"]]) +
-                f"\n评级：{result['level']}\n判断依据：{result['reason']}")
-    lines = ["无法准确匹配", "未匹配原因：" + result["unmatched_reason"]]
-    for index, candidate in enumerate(result["candidates"], 1):
-        lines.extend([f"\n候选 {index}：" + describe(by_id[candidate["rule_id"]]),
-                      "可能匹配：" + candidate["match_reason"], "未确定原因：" + candidate["uncertainty"]])
-    if not result["candidates"]:
-        lines.append("候选规则：暂无可确认的候选")
-    if result["missing_information"]:
-        lines.append("需补充：" + "；".join(result["missing_information"]))
-    return "\n".join(lines)
+    compact = lambda text: ' '.join(str(text or '').split())
+    if result['matched']:
+        rule = by_id[result['rule_id']]
+        logger.info('规则匹配结果：rule_id=%s level=%s reason=%s', result['rule_id'], result['level'], result['reason'])
+        lines = [f"已匹配｜{rule['work_type']}", '对应：' + compact(rule['content'])]
+        if result['level'] != rule['default_level']:
+            lines.append(f"调整为 {result['level']}：{compact(result['reason'])}")
+        return '\n'.join(lines)
+    candidates = [by_id[c['rule_id']] for c in result['candidates']]
+    labels = list(dict.fromkeys(r['work_type'] for r in candidates))
+    # 同名候选用工作内容区分，记录 ID 留在日志中。
+    if len(labels) < len(candidates):
+        labels = list(dict.fromkeys(f"{r['work_type']}（{compact(r['content'])}）" for r in candidates))
+    lines = ['待确认｜' + (' / '.join(labels) if labels else '暂无明确候选'), compact(result['unmatched_reason'])]
+    if result['missing_information']:
+        lines.append('需补充：' + '；'.join(compact(v) for v in result['missing_information']))
+    logger.info('规则待确认：candidates=%s reason=%s', result['candidates'], result['unmatched_reason'])
+    return '\n'.join(lines)

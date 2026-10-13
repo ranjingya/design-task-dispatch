@@ -57,7 +57,7 @@ def test_success_writes_rating_and_score(feishu, monkeypatch):
     fields = feishu.update_record.call_args.args[1]
     assert set(fields) == {"类别", "等级", "结果", "分数"}
     assert fields["类别"] == "测试类型"
-    assert "recRule" in fields["结果"]
+    assert fields["结果"] == "已匹配｜测试类型\n对应：测试工作"
     assert classify.call_args.args[0]["platform"] == "示例平台"
     assert fields["等级"] == "A"
     assert fields["分数"] == 2
@@ -79,7 +79,7 @@ def test_unsupported_attachment_provides_candidates(feishu, monkeypatch):
     feishu.get_record.return_value["材料"] = [{"file_token": "file", "type": "application/pdf"}]
     process_record("recTest", MAPPING, feishu)
     assert "附件 1" in classify.call_args.args[0]["material_issues"][0]
-    assert "候选 1" in feishu.update_record.call_args.args[1]["结果"]
+    assert "待确认｜测试类型" in feishu.update_record.call_args.args[1]["结果"]
 
 
 def test_model_failure_is_retryable_and_does_not_write_type(feishu, monkeypatch):
@@ -194,7 +194,7 @@ def test_needs_review_clears_stale_rating(feishu, monkeypatch):
     process_record("recTest", MAPPING, feishu)
     updates = feishu.update_record.call_args.args[1]
     assert updates["类别"] is None and updates["等级"] is None
-    assert "测试工作" in updates["结果"] and "用途未确定" in updates["结果"]
+    assert "待确认｜测试类型" in updates["结果"] and "用途不清晰" in updates["结果"]
 
 
 def test_failed_write_does_not_report_success(feishu, monkeypatch):
@@ -234,7 +234,7 @@ def test_rules_normalization_and_duplicate_names():
     assert rules == RULES
     second = RULES[0] | {"record_id": "recSecond", "content": "另一工作", "assignment": "固定人员"}
     output = format_result(RATED | {"rule_id": "recSecond"}, RULES + [second])
-    assert "另一工作" in output and "固定人员" in output and "recSecond" in output
+    assert output == "已匹配｜测试类型\n对应：另一工作"
 
 
 def test_material_failure_cannot_produce_rating(settings, monkeypatch):
@@ -383,4 +383,14 @@ def test_recommendation_failure_preserves_rating_and_clears_old_recommendation(f
     monkeypatch.setattr('app.dispatch.recommend', Mock(side_effect=RuntimeError('来源不可读')))
     process_record('recTest', mapping, feishu)
     updates = feishu.update_record.call_args.args[1]
-    assert updates['分数'] == 2 and updates['推荐人'] == [] and '推荐失败' in updates['推荐结果']
+    assert updates['分数'] == 2 and updates['推荐人'] == [] and updates['推荐结果'] == '人工分配\n资源读取或配置校验失败，请重试\n人员负载暂不可用\n本任务 2 分'
+
+
+def test_compact_match_adjustment_and_duplicate_candidates():
+    output = format_result(RATED | {'level': 'B', 'reason': '需要重新设计\n版式'}, RULES)
+    assert output == '已匹配｜测试类型\n对应：测试工作\n调整为 B：需要重新设计 版式'
+    second = RULES[0] | {'record_id': 'second', 'content': '另一工作'}
+    result = REVIEW | {'candidates': REVIEW['candidates'] + [REVIEW['candidates'][0] | {'rule_id': 'second'}]}
+    output = format_result(result, RULES + [second])
+    assert '测试类型（测试工作） / 测试类型（另一工作）' in output
+    assert 'recRule' not in output and 'second' not in output

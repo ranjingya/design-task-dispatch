@@ -187,7 +187,7 @@ def test_platform_owner_or_exclusion(platform_client, platform, expected):
     assert updates['推荐人'] == [{'id': expected}]
     assert state is None
     if expected == 'b':
-        assert '排除原认领人员：甲' in updates['说明']
+        assert '排除原认领人甲' in updates['说明']
 
 
 @pytest.mark.parametrize('platform', ['', '未知平台', '平台甲、平台乙', 'aabb'])
@@ -232,3 +232,36 @@ def test_platform_exclusion_load_priority_and_rotation(platform_client):
     assert run(platform_client, '找对应人员', 'creative', demand)[0]['推荐人'] == [{'id': 'c'}]
     platform_client.data['tasks'] = [row('busy', 推荐人=[{'id': 'c'}], 分数=10)]
     assert run(platform_client, '找对应人员', 'creative', demand)[0]['推荐人'] == [{'id': 'b'}]
+
+
+@pytest.mark.parametrize('method,rid,demand,heading', [
+    ('轮流', 'r', {}, '轮流'),
+    ('固定人员（甲 乙）', 'r', {}, '固定人员'),
+    ('人工分配', 'r', {}, '人工分配'),
+    ('找对应人员', 'unknown', {}, '人工分配'),
+    ('找对应人员', 'shop', {'department': '部门甲', 'platform': '店铺一'}, '对应人员'),
+    ('找对应人员', 'shop', {}, '人工分配'),
+    ('固定人员（未知）', 'r', {}, '人工分配'),
+])
+def test_recommendation_four_line_display(client, method, rid, demand, heading):
+    updates, _ = run(client, method, rid, demand)
+    lines = updates['说明'].splitlines()
+    assert len(lines) == 4 and lines[0] == heading and lines[3] == '本任务 4 分'
+    assert '甲 0' in lines[2]
+    assert '推荐：' not in updates['说明'] and 'record_id' not in updates['说明']
+
+
+def test_platform_display_hides_source_ids(platform_client):
+    for platform,heading in [('平台甲', '对应人员'), ('平台乙', '轮流')]:
+        updates, _ = run(platform_client, '找对应人员', 'creative', {'title': 'XX12345', 'platform': platform})
+        lines = updates['说明'].splitlines()
+        assert len(lines) == 4 and lines[0] == heading
+        assert '商品归属记录' not in updates['说明']
+        assert lines[2] == ('甲 0' if heading == '对应人员' else '乙 0')
+
+
+def test_missing_score_display(client):
+    updates, _ = recommend('self', {}, {}, None, M, client)
+    assert updates['说明'].splitlines() == ['人工分配', '未准确匹配规则，暂时无法推荐', '人员负载未比较', '本任务分数待确定']
+    client.data['tasks'] = [row('missing', 推荐人=[{'id': 'a'}])]
+    assert run(client)[0]['说明'].splitlines() == ['人工分配', '候选人员存在任务缺分，暂时无法比较负载', '甲 缺分 ｜ 乙 0', '本任务 4 分']

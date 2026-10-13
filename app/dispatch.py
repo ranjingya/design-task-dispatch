@@ -12,7 +12,7 @@ from app.config import Settings, load_fields
 from app.feishu import FeishuClient
 from app.rules import select_department, review, format_result, load_score
 from app.rule_cache import load_daily_rules
-from app.recommendation import protected, recommend, save_rotation
+from app.recommendation import protected, recommend, save_rotation, format_recommendation
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
                 updates.update(recommendation)
             except Exception:
                 logger.exception("人员推荐失败：record_id=%s", record_id)
-                updates.update({mapping['recommendation_result']: "推荐失败：资源读取或配置校验失败，请查看日志并重新触发。",
+                updates.update({mapping['recommendation_result']: format_recommendation('人工分配', '资源读取或配置校验失败，请重试', '人员负载暂不可用', score),
                                 mapping['recommended_assignee']: []})
             # 模型运行期间可能有人确认，回写前再次检查人工安排。
             if protected(feishu.get_record(record_id), mapping):
