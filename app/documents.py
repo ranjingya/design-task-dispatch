@@ -80,10 +80,12 @@ def read_xlsx(data: bytes, source: str, material) -> None:
                 material.issue(label, "单元格数量超过上限")
                 break
             material.add_text(label, "合并范围：" + str(sheet.merged_cells))
+            sheet_has_text = False
             for row in sheet.iter_rows():
                 values = []
                 for cell in row:
                     if cell.value is not None:
+                        sheet_has_text = True
                         values.append(f"{cell.coordinate}={cell.value}")
                     if cell.comment:
                         values.append(f"{cell.coordinate}批注={cell.comment.text}")
@@ -93,7 +95,20 @@ def read_xlsx(data: bytes, source: str, material) -> None:
                 anchor = getattr(picture.anchor, "_from", None)
                 position = f"{get_column_letter(anchor.col + 1)}{anchor.row + 1}" if anchor else "浮动图片"
                 try:
-                    material.add_image(picture._data(), f"{label} / {position}")
+                    # 列标题和附近单元格随目录发送；必读判断限定标题及明确看图指引。
+                    nearby, headings = [], []
+                    if anchor:
+                        row, col = anchor.row + 1, anchor.col + 1
+                        for nearby_row in sheet.iter_rows(min_row=max(1, row - 1), max_row=min(sheet.max_row, row + 1),
+                                                    min_col=max(1, col - 1), max_col=min(sheet.max_column, col + 1)):
+                            nearby.extend(f"{cell.coordinate}={cell.value}" for cell in nearby_row if cell.value is not None)
+                        headings = [str(sheet.cell(r, col).value or "") for r in range(1, min(row, 4))]
+                    context = " | ".join(headings + nearby)
+                    visual_options = material.config["visual_review"]
+                    required = (not sheet_has_text or any(word in sheet.title + " ".join(headings) for word in visual_options["instruction_keywords"])
+                                or any(word in context for word in visual_options["image_reference_keywords"]))
+                    material.add_image(picture._data(), f"{label} / {position}", group=label,
+                                       context=context, requires_detail=required)
                 except Exception:
                     material.issue(label, "内嵌图片无法读取")
             if sheet._charts:
@@ -134,12 +149,18 @@ def read_pdf(data: bytes, source: str, material) -> None:
             label = f"{source} / 第 {index + 1} 页"
             with closing(document[index]) as page:
                 with closing(page.get_textpage()) as textpage:
-                    material.add_text(label, textpage.get_text_bounded())
+                    text = textpage.get_text_bounded()
+                    material.add_text(label, text)
                 if not material.image_available(label):
                     continue
-                scale = min(2, material.config["image_long_edge"] / max(page.get_size()))
+                scale = min(2, material.config["visual_review"]["detail_tile_size"] / min(page.get_size()))
+                if page.get_width() * page.get_height() * scale * scale > 40_000_000:
+                    material.issue(label, "PDF 页面像素超过上限，请拆分长页面")
+                    continue
                 with closing(page.render(scale=scale)) as bitmap:
                     picture = bitmap.to_pil()
                     output = io.BytesIO()
                     picture.save(output, format="PNG")
-                    material.add_image(output.getvalue(), label)
+                    visual_options = material.config["visual_review"]
+                    required = not text.strip() or any(word in text for word in visual_options["instruction_keywords"] + visual_options["image_reference_keywords"])
+                    material.add_image(output.getvalue(), label, group=source, context=text[:2000], requires_detail=required)

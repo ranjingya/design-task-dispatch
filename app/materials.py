@@ -2,6 +2,7 @@
 
 import base64
 import logging
+import time
 
 from app.feishu import FeishuClient
 
@@ -15,6 +16,7 @@ class MaterialBundle:
     def __init__(self, settings, config):
         self.settings, self.config = settings, config
         self.texts, self.images, self.issues, self.image_sources = [], [], [], []
+        self.image_parts = []
         self.text_size = self.image_size = self.file_size = 0
 
     def issue(self, source, reason):
@@ -42,9 +44,10 @@ class MaterialBundle:
             return False
         return True
 
-    def add_image(self, data, source):
-        """功能说明：校验并压缩图片后加入模型输入。参数 data：图片字节；source：文件、工作表或页码来源。返回值：无。"""
+    def add_image(self, data, source, *, group=None, context="", requires_detail=False):
+        """功能说明：校验并压缩图片后加入模型输入。参数 data：图片字节；source：文件、工作表或页码来源；group：所属工作表或文件；context：附近文字；requires_detail：是否必须查看原图。返回值：无。"""
         import io
+        from app.visual_review import detail_images, visual_config
         from PIL import Image, ImageOps
 
         if not self.image_available(source):
@@ -60,18 +63,23 @@ class MaterialBundle:
             picture = ImageOps.exif_transpose(picture).convert("RGBA")
             background = Image.new("RGBA", picture.size, "white")
             picture = Image.alpha_composite(background, picture).convert("RGB")
+            parts = detail_images(picture, visual_config(self.config))
             picture.thumbnail((self.config["image_long_edge"],) * 2)
             output = io.BytesIO()
             picture.save(output, format="JPEG", quality=85)
         encoded = output.getvalue()
-        if len(encoded) > min(self.settings.max_image_bytes, self.settings.max_total_image_bytes - self.image_size):
+        part_sizes = [len(base64.b64decode(part["image_url"]["url"].split(",", 1)[1])) for part in parts]
+        total_size = len(encoded) + sum(part_sizes)
+        if max([len(encoded), *part_sizes]) > self.settings.max_image_bytes or total_size > self.settings.max_total_image_bytes - self.image_size:
             self.issue(source, "图片大小超过上限")
             return
-        self.image_size += len(encoded)
+        self.image_size += total_size
         self.images.append({"type": "image_url", "image_url": {
             "url": "data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii"),
         }})
-        self.image_sources.append({"image_index": len(self.images), "source": source})
+        self.image_parts.append(parts)
+        self.image_sources.append({"image_index": len(self.images), "source": source,
+                                   "group": group or source, "context": context[:2000], "requires_detail": requires_detail})
 
 
 def sheet_token(value, config):
@@ -97,6 +105,7 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
     from pathlib import Path
     from app.documents import read_document
 
+    started = time.monotonic()
     path = feishu.settings.materials_path
     logger.info("加载材料配置：%s", path)
     config = json.loads(path.read_text(encoding="utf-8"))
@@ -106,6 +115,8 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
             raise ValueError(f"材料配置 {key} 必须为正整数")
     if not isinstance(config.get("allowed_sheet_hosts"), list) or type(config.get("skip_hidden_sheets")) is not bool:
         raise ValueError("材料域名或隐藏工作表配置无效")
+    from app.visual_review import visual_config
+    visual_config(config)
     bundle = MaterialBundle(feishu.settings, config)
     if not isinstance(attachments, list):
         raise ValueError("附件字段格式错误")
@@ -139,7 +150,9 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
                 raise ValueError("附件内容无效或超过上限")
             bundle.file_size += len(data)
             if image_file:
-                bundle.add_image(data, source)
+                keywords = config["visual_review"]["instruction_keywords"] + config["visual_review"]["image_reference_keywords"]
+                bundle.add_image(data, source, group="图片附件", context=name,
+                                 requires_detail=any(word in name for word in keywords))
             else:
                 read_document(data, suffix, source, bundle)
             logger.info("附件读取完成：record_id=%s index=%d", record_id, index)
@@ -163,5 +176,5 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
         except Exception as exc:
             logger.warning("在线电子表格解析异常：error_type=%s", type(exc).__name__)
             bundle.issue(source, "在线表格无法完整解析")
-    logger.info("材料整理完成：record_id=%s text_chars=%d images=%d issues=%d", record_id, bundle.text_size, len(bundle.images), len(bundle.issues))
+    logger.info("材料整理完成：record_id=%s text_chars=%d images=%d issues=%d elapsed=%.2fs", record_id, bundle.text_size, len(bundle.images), len(bundle.issues), time.monotonic() - started)
     return bundle

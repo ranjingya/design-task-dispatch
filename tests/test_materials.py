@@ -79,7 +79,9 @@ def test_excel_text_images_and_hidden_scope(settings, config):
     assert not bundle.issues
     assert any("A1=请制作商品主图" in row["text"] for row in bundle.texts)
     assert not any("不可用的旧需求" in row["text"] for row in bundle.texts)
-    assert bundle.image_sources == [{"image_index": 1, "source": "需求.xlsx / 修改要求 / C3"}]
+    assert bundle.image_sources[0]["source"] == "需求.xlsx / 修改要求 / C3"
+    assert bundle.image_sources[0]["requires_detail"] is True
+    assert "750" in bundle.image_sources[0]["context"]
     assert len(bundle.images) == 1
 
 
@@ -164,3 +166,16 @@ def test_export_poll_download_and_failure(settings, monkeypatch):
     request.side_effect = [{"data": {"ticket": "task"}}, {"data": {"result": {"job_status": 0, "file_size": 101}}}]
     with pytest.raises(ValueError, match="大小"):
         feishu.export_sheet("sheet", 100, 1, 1)
+
+
+def test_multiple_visible_sheets_survive_image_context(settings, config):
+    """有图片的工作表不能影响后续工作表的解析配置。"""
+    workbook = openpyxl.load_workbook(io.BytesIO(workbook_bytes()))
+    extra = workbook.create_sheet("第二个工作表")
+    extra["A1"] = "后续需求内容"
+    output = io.BytesIO()
+    workbook.save(output)
+    bundle = MaterialBundle(settings, config)
+    read_document(output.getvalue(), ".xlsx", "多页签.xlsx", bundle)
+    assert not bundle.issues
+    assert any("后续需求内容" in part["text"] for part in bundle.texts)

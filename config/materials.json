@@ -10,6 +10,49 @@
   "image_long_edge": 1800,
   "export_attempts": 20,
   "export_interval_seconds": 2,
-  "allowed_sheet_hosts": ["kocotree.feishu.cn"],
-  "skip_hidden_sheets": true
+  "allowed_sheet_hosts": [
+    "kocotree.feishu.cn"
+  ],
+  "skip_hidden_sheets": true,
+  "visual_review": {
+    "max_rounds": 3,
+    "first_round_images": 5,
+    "next_round_images": 10,
+    "overview_size": 6,
+    "thumbnail_width": 440,
+    "thumbnail_height": 320,
+    "detail_tile_size": 1600,
+    "detail_overlap": 100,
+    "max_detail_parts": 12,
+    "instruction_keywords": [
+      "流程",
+      "步骤",
+      "操作说明",
+      "修改标注",
+      "修改要求",
+      "制作说明",
+      "需求说明",
+      "标注示意"
+    ],
+    "image_reference_keywords": [
+      "见图",
+      "看图",
+      "图中说明",
+      "图中要求",
+      "图示说明",
+      "要求见附件",
+      "按附件要求",
+      "附件中的要求"
+    ],
+    "business_keywords": [
+      "商品图",
+      "实物图",
+      "模特图",
+      "白底图",
+      "场景图",
+      "参考图",
+      "素材图"
+    ],
+    "long_image_ratio": 3
+  }
 }

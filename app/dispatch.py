@@ -69,7 +69,7 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
             demand["image_sources"] = material.image_sources
             # 未读取的材料显式传入，让模型列出候选；程序禁止此时给出确定评级。
             demand["material_issues"] = material.issues
-            result = AIClient(feishu.settings).classify(demand, eligible, options, material.images, department)
+            result = AIClient(feishu.settings).classify(demand, eligible, options, material.images, department, material=material)
         score = None
         rule = None
         explanation = format_result(result, rules)
@@ -143,6 +143,7 @@ class Dispatcher:
     def _run(self, record_id: str, mapping: dict[str, str]) -> None:
         """执行任务；失败允许再次投递，成功保留五分钟去重记录。"""
         success = False
+        started = time.monotonic()
         logger.info("开始处理：record_id=%s", record_id)
         try:
             self.runner(record_id, mapping, self.feishu)
@@ -154,7 +155,7 @@ class Dispatcher:
                 self._active.discard(record_id)
                 if success:
                     self._recent[record_id] = time.monotonic() + 300
-            logger.info("处理结束：record_id=%s success=%s", record_id, success)
+            logger.info("处理结束：record_id=%s success=%s elapsed=%.2fs", record_id, success, time.monotonic() - started)
 
     def close(self) -> None:
         """停止接收后台任务并等待已接收任务结束。"""

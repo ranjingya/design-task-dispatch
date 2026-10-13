@@ -35,7 +35,7 @@
 
 `prompts/classify.md` 保存判断要求及 JSON 输出协议。输出包括 `matched`、`department`、`rule_id`、`level`、`work_type`、`reason`、`candidates`、`unmatched_reason`、`missing_information`。程序只校验结构和引用一致性，具体分档准确性需要业务样本验证。
 
-默认最多 32 张图片，单张 10 MiB，总计 20 MiB，可通过 `MAX_IMAGES`、`MAX_IMAGE_BYTES`、`MAX_TOTAL_IMAGE_BYTES` 调整；编码后的完整模型请求限制为 45 MiB。参与识别的附件不支持、过大或下载失败时，向模型明确传入材料缺口；只允许输出候选，禁止基于部分材料给出确定评级。
+本地材料池默认最多 32 张原始图片，单张或切片 10 MiB，预览及清晰分段总计 20 MiB，可通过 `MAX_IMAGES`、`MAX_IMAGE_BYTES`、`MAX_TOTAL_IMAGE_BYTES` 调整；编码后的完整模型请求限制为 45 MiB。参与识别的附件不支持、过大或下载失败时，向模型明确传入材料缺口；只允许输出候选，禁止基于部分材料给出确定评级。
 
 模型接口参考：[JSON 输出](https://api-docs.deepseek.com/guides/json_mode/)、[图片输入](https://api-docs.deepseek.com/guides/vision/)。
 
@@ -156,3 +156,15 @@ docker compose logs -f design-task-dispatch
 XLSX 读取可见工作表的缓存单元格值、批注、合并范围和锚定图片；不执行宏、公式或外部链接，隐藏页按配置跳过。缺失公式缓存、图表、特殊单元格图片或嵌入对象会提示材料缺口。PDF 逐页提取文字并渲染页面，扫描页直接交给视觉模型。加密、损坏、超限或权限不足均明确进入待确认，不声称完整读取。
 
 上线时同步 `config/materials.json`、`config/fields.json` 和 `prompts/classify.md`，环境变量保持服务器路径。所需依赖随镜像安装。
+
+## 图片总览与按需补图
+
+图片先在程序内按工作表或来源分组，生成带 IMG 编号的缩略图总览，默认每张最多 6 个缩略图。来源、列标题、附近单元格说明通过图片目录提供。总览用于识别图片用途；模型按真实编号点选原图或尚未阅读的总览。原图长截图按顺序切成重叠分段，避免缩小后丢失说明文字。
+
+`config/materials.json` 的 `visual_review` 配置在每条需求开始读取材料时加载：`max_rounds=3`、`first_round_images=5`、`next_round_images=10`。首轮最多 5 张总览，后两轮各最多补 10 张图片消息，累计最多 25 张新增图片消息；每张总览、原图或长图分段分别计数。此前发送的图片与回复保留在后续请求的上下文中，重试属于同一轮。目录编号稳定，不重复追加已发送图片。
+
+首轮优先覆盖说明类来源，再轮转不同工作表。全部总览必须检查；明确的流程说明、修改标注、纯图片工作表、扫描页，以及正文要求看图的材料必须读取清晰原图。关键词在外部配置的 `instruction_keywords`、`image_reference_keywords`、`business_keywords` 维护。这些基于文字的识别规则提供覆盖检查，图片内容理解仍由模型完成。
+
+模型返回 `action=request_images` 时给出带编号和原因的 `requests`；返回 `action=final` 时附完整评级字段。程序校验编号、保留待发送队列，禁止因提前输出最终结果而跳过必读材料。达到轮次上限仍未覆盖，或反复请求已读图片而缺少结论时，结果转待确认。仅在总览中阅读、没有放大的普通商品素材不构成材料缺口；实际下载、解析失败与超限仍明确提示。日志记录每轮新增图片、累计发送数及模型和评级耗时。
+
+`prompts/select_images.md` 用于材料覆盖未完成时的选图阶段，仅提供需求、目录和图片；覆盖完成后使用 `prompts/classify.md` 并发送业务规则进行评级。两个提示词放在同一容器外目录。

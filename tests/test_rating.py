@@ -116,11 +116,14 @@ def test_ai_retries_transient_failure_and_sends_json_images(settings, monkeypatc
     post = Mock(side_effect=[httpx.Response(429), response])
     monkeypatch.setattr("app.ai.httpx.post", post)
     monkeypatch.setattr("app.ai.time.sleep", Mock())
-    images = [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}}]
+    from PIL import Image
+    from app.visual_review import image_message
+    images = [image_message(Image.new("RGB", (100, 100), "white"))]
     result = AIClient(settings).classify({"title": "测试"}, RULES, OPTIONS, images, "测试部")
     assert result == RATED and post.call_count == 2
     payload = post.call_args.kwargs["json"]
-    assert payload["messages"][1]["content"][1:] == images
+    assert len(payload["messages"][1]["content"][1:]) == 1
+    assert json.loads(payload["messages"][1]["content"][0]["text"])["visual_review"]["current_images"] == ["overview:1"]
     assert payload["response_format"] == {"type": "json_object"}
     assert payload["max_tokens"] == settings.ai_max_tokens
 
