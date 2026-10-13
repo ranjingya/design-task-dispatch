@@ -29,6 +29,12 @@ def department_values(value) -> list[str]:
 
 def load_score(value) -> int | float | None:
     """校验规则分数；缺失、负数、布尔值或非有限数字返回空值。"""
+    # 飞书应用接口可能将数字字段序列化为数字字符串。
+    if isinstance(value, str):
+        value = value.strip()
+        if not re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", value):
+            return None
+        value = float(value)
     if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
         return None
     return value

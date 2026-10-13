@@ -316,7 +316,7 @@ def test_unmatched_clears_previous_load_score(feishu, monkeypatch):
     assert feishu.update_record.call_args.args[1]['分数'] is None
 
 
-@pytest.mark.parametrize('score', [None, -1, True, '3', float('nan'), float('inf')])
+@pytest.mark.parametrize('score', [None, -1, True, '3分', '', 'NaN', '1e999', float('nan'), float('inf')])
 def test_invalid_rule_score_never_becomes_zero(feishu, monkeypatch, score):
     feishu.get_rules.return_value = [{'record_id': 'recRule', 'fields':
                                      RAW_RULES[0]['fields'] | {'人员负载分数': score}}]
@@ -345,3 +345,12 @@ def test_changed_input_or_score_schema_fails_before_ai(feishu, monkeypatch, fiel
         process_record('recTest', MAPPING, feishu)
     classify.assert_not_called()
     feishu.update_record.assert_not_called()
+
+
+@pytest.mark.parametrize('raw,expected', [('4', 4), ('7.5', 7.5), ('0', 0), (' 2 ', 2)])
+def test_feishu_numeric_string_score(feishu, monkeypatch, raw, expected):
+    feishu.get_rules.return_value = [{'record_id': 'recRule', 'fields':
+                                     RAW_RULES[0]['fields'] | {'人员负载分数': raw}}]
+    monkeypatch.setattr(AIClient, 'classify', Mock(return_value=RATED))
+    process_record('recTest', MAPPING, feishu)
+    assert feishu.update_record.call_args.args[1]['分数'] == expected
