@@ -102,9 +102,20 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
     logger.info('加载人员推荐配置：%s', path)
     config = json.loads(path.read_text(encoding='utf-8'))
     settings = feishu.settings
-    if not settings.members_table_id or not settings.member_ids:
-        raise ValueError('请配置 FEISHU_MEMBERS_TABLE_ID 和 FEISHU_MEMBER_IDS_JSON')
-    names = settings.member_ids
+    if not settings.members_table_id:
+        raise ValueError('请配置 FEISHU_MEMBERS_TABLE_ID')
+    names = config.get('members')
+    routes = config.get('ownership_routes')
+    if not isinstance(names, dict) or not names or any(
+        not isinstance(k, str) or not k.strip() or not isinstance(v, str) or not v.strip()
+        for k, v in names.items()
+    ):
+        raise ValueError('推荐配置 members 必须为非空人员映射')
+    if not isinstance(routes, dict) or any(
+        not isinstance(k, str) or not k.strip() or v not in ('product', 'shop')
+        for k, v in routes.items()
+    ):
+        raise ValueError('推荐配置 ownership_routes 必须映射到 product 或 shop')
     if len(set(names.values())) != len(names) or set(config['rotation']) != set(names) or len(config['rotation']) != len(names):
         raise ValueError('人员映射或轮换顺序有重复、缺失')
     current = {uid for row in feishu.get_records(settings.members_table_id)
@@ -127,7 +138,7 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
         if not candidates or len(set(candidates)) != len(candidates) or any(n not in names for n in candidates):
             return answer(source + '固定人员名单缺失或包含未配置成员，需人工确认。')
     elif method == '找对应人员':
-        route = settings.ownership_routes.get(rule['record_id'])
+        route = routes.get(rule['record_id'])
         if route == 'shop':
             shop = shop_owner(demand, config['shops'])
             if not shop:

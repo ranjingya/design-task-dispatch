@@ -119,7 +119,7 @@ docker compose logs -f design-task-dispatch
 
 ## 人员推荐
 
-`config/recommendation.json` 与字段映射放在同一目录，随现有 config 挂载到容器外。每条需求重新读取，包含轮换顺序、商品字段及货号识别规则、店铺主次负责人和别名。成员名单必须与成员负荷表一致。
+`config/recommendation.json` 与字段映射放在同一目录，随现有 config 挂载到容器外。每条需求重新读取，包含人员昵称与用户 ID 映射、规则记录 ID 到归属查询方式的映射、轮换顺序、商品字段及货号识别规则、店铺主次负责人和别名。成员名单必须与成员负荷表一致。
 
 - 轮流：全体成员中总负载最低优先，同分按配置顺序轮换。
 - 固定人员：解析规则括号内名单，在指定人员中负载优先、同分轮换。
@@ -140,9 +140,7 @@ docker compose logs -f design-task-dispatch
 - `FEISHU_RULES_TABLE_ID`：同一 Base 下的规则表。
 - `FEISHU_MEMBERS_TABLE_ID`：同一 Base 下的成员负荷表。
 - `FEISHU_PRODUCT_BASE_TOKEN`、`FEISHU_PRODUCT_TABLE_ID`：商品数据包分配表。
-- `FEISHU_MEMBER_IDS_JSON`：人员昵称到用户 ID 的 JSON 对象。
-- `FEISHU_OWNERSHIP_ROUTES_JSON`：规则记录 ID 到 `product` 或 `shop` 的 JSON 对象。
 
-JSON 环境变量使用单引号包裹完整 JSON，对象内键和值使用双引号。实际 ID 只保存在部署环境的 `.env`，`.env.example` 提供空模板。字段名称映射及业务名单在容器外 JSON 中维护。修改 `.env` 后重建容器以加载新值。
+`.env` 使用简单键值，保存凭证、Base Token、表 ID、模型接口、超时重试及路径等运行参数，`.env.example` 提供模板。`config/recommendation.json` 的 `members` 保存昵称到用户 ID 的映射，`ownership_routes` 保存规则记录 ID 到 `product` 或 `shop` 的映射；字段映射、名单及分配规则也在容器外 JSON 中维护，每次任务重新读取。修改 `.env` 后重建容器以加载新值。
 
 应用需具备成员负荷表和跨 Base 数据包分配表读取权限。部署时同步 `.env`、 `config/recommendation.json` 和 `config/fields.json`；Compose 的现有目录挂载与缓存卷即可使用。
