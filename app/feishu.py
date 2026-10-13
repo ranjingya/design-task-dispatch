@@ -108,27 +108,54 @@ class FeishuClient:
         logger.info("规则加载完成：count=%d", len(rules))
         return rules
 
-    def download_image(self, file_token: str, record_id: str, field_id: str, limit: int) -> bytes:
+    def download_attachment(self, file_token: str, record_id: str, field_id: str, limit: int) -> bytes:
         """功能说明：限量下载飞书素材。参数 file_token：素材令牌；record_id：所属记录；field_id：附件字段；limit：字节上限。返回值：文件字节。"""
         import json
 
         extra = {"bitablePerm": {"tableId": self.settings.table_id,
                                  "attachments": {field_id: {record_id: [file_token]}}}}
         url = API + f"/drive/v1/medias/{quote(file_token, safe='')}/download"
+        return self._download(url, limit, {"extra": json.dumps(extra)})
+
+    def _download(self, url: str, limit: int, params: dict | None = None) -> bytes:
+        """流式下载官方接口返回的文件，并限制实际接收字节。"""
         try:
             with httpx.stream("GET", url, timeout=30, follow_redirects=True,
-                              params={"extra": json.dumps(extra)},
+                              params=params,
                               headers={"Authorization": f"Bearer {self._access_token()}"}) as response:
                 if not response.is_success:
-                    raise RuntimeError(f"飞书附件下载失败：HTTP {response.status_code}")
+                    raise RuntimeError(f"飞书文件下载失败：HTTP {response.status_code}")
                 chunks, size = [], 0
                 for chunk in response.iter_bytes(65536):
                     size += len(chunk)
                     if size > limit:
-                        raise ValueError("图片超过大小限制")
+                        raise ValueError("文件超过大小限制")
                     chunks.append(chunk)
                 if not size:
-                    raise ValueError("图片为空")
+                    raise ValueError("文件为空")
                 return b"".join(chunks)
         except httpx.RequestError:
-            raise RuntimeError("飞书附件下载网络异常") from None
+            raise RuntimeError("飞书文件下载网络异常") from None
+
+    def export_sheet(self, token: str, limit: int, attempts: int, interval: int) -> bytes:
+        """功能说明：导出在线电子表格为 Excel。参数 token：电子表格令牌；limit：文件字节上限；attempts：最多查询次数；interval：查询间隔秒数。返回值：Excel 文件字节。"""
+        logger.info("开始导出飞书电子表格")
+        headers = {"Authorization": f"Bearer {self._access_token()}"}
+        ticket = self._request("POST", "/drive/v1/export_tasks", headers=headers,
+                               json={"token": token, "type": "sheet", "file_extension": "xlsx"})["data"]["ticket"]
+        for attempt in range(attempts):
+            result = self._request("GET", f"/drive/v1/export_tasks/{quote(ticket, safe='')}",
+                                   headers=headers, params={"token": token})["data"]["result"]
+            status = result.get("job_status")
+            if status == 0:
+                if int(result.get("file_size", 0)) > limit:
+                    raise ValueError("在线电子表格导出文件超过大小上限")
+                path = "/drive/v1/export_tasks/file/" + quote(result["file_token"], safe="") + "/download"
+                data = self._download(API + path, limit)
+                logger.info("电子表格导出完成：bytes=%d", len(data))
+                return data
+            if status not in (1, 2):
+                raise RuntimeError(f"电子表格导出失败：状态 {status}，请检查应用的文档访问与导出权限")
+            if attempt + 1 < attempts:
+                time.sleep(interval)
+        raise RuntimeError("电子表格导出超时，请稍后重试")

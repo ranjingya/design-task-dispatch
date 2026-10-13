@@ -1,0 +1,15 @@
+{
+  "max_files": 10,
+  "max_file_bytes": 67108864,
+  "max_total_file_bytes": 134217728,
+  "max_unpacked_bytes": 268435456,
+  "max_cells": 100000,
+  "max_sheets": 20,
+  "max_pdf_pages": 20,
+  "max_text_chars": 60000,
+  "image_long_edge": 1800,
+  "export_attempts": 20,
+  "export_interval_seconds": 2,
+  "allowed_sheet_hosts": ["kocotree.feishu.cn"],
+  "skip_hidden_sheets": true
+}

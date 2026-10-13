@@ -6,14 +6,14 @@
 
 - 接收 `POST /webhook/task`，校验共享密钥和记录 ID，在单个后台线程执行评级。
 - 读取需求及工作类型单选选项；规则表全量分页读取后保存为每日本地快照。
-- 支持 PNG、JPEG、WebP 图片附件，下载后以 Base64 交给 DeepSeek。
+- 支持 PNG、JPEG、WebP 图片、XLSX 与 PDF 附件，以及「需求文档链接」中的飞书电子表格。文档文字保留工作表、坐标与页码，图片压缩后交给模型。
 - 模型返回固定 JSON，程序校验规则 ID、部门范围、类型名称及等级，再回写工作类型、分类等级、匹配结果和任务负载分。
 - 信息不足、规则冲突或附件无法完整读取时，匹配结果展示候选规则、可能匹配的依据、未确定原因及待补充信息；工作类型、分类等级和任务负载分清空，避免保留过期评级。
 - 模型网络异常、限流和部分服务端错误最多尝试三次；非法输出不会写入工作类型。失败提示写入匹配结果，详细异常留在日志。
 - 对处理中及最近五分钟成功完成的记录去重；失败记录可重新投递。
 - 字段映射接收任务时读取，提示词调用模型前读取；业务数据及结果保存在飞书。
 
-人员推荐在评级后执行，组长确认最终负责人。PDF、Word、Excel、GIF 等附件当前进入待确认分支，需要补充支持的图片后重新触发。
+人员推荐在评级后执行，组长确认最终负责人。ZIP、RAR、7Z 素材压缩包跳过，不单独导致待确认；XLS 提取文字后提示转为 XLSX 核对图片。Word、GIF 等未支持附件进入待确认。
 
 ## 规则快照
 
@@ -25,17 +25,17 @@
 
 ## 评级配置
 
-在 `.env` 配置同一 Base 下的 `FEISHU_RULES_TABLE_ID`，以及 `DEEPSEEK_BASE_URL`、`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`。接口地址可包含 `/v1`，程序追加 `/chat/completions`。模型使用思考模式进行规则判断，输出上限 8192 tokens。默认超时 90 秒，可通过 `AI_TIMEOUT_SECONDS` 调整；`AI_MAX_ATTEMPTS` 为总尝试次数，范围 1～3。
+在 `.env` 配置同一 Base 下的 `FEISHU_RULES_TABLE_ID`，以及 `DEEPSEEK_BASE_URL`、`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`。接口地址可包含 `/v1`，程序追加 `/chat/completions`。模型使用思考模式进行规则判断，输出上限默认 16384 tokens（包含模型推理），可通过 `AI_MAX_OUTPUT_TOKENS` 设置为 1024～32768。默认超时 90 秒，可通过 `AI_TIMEOUT_SECONDS` 调整；`AI_MAX_ATTEMPTS` 为总尝试次数，范围 1～3。
 
 `config/fields.json` 中 `work_type`、`level` 对应「工作类型」「分类等级」单选字段，`department` 对应「部门」单选字段，`platform` 对应「平台」文本字段，`load_score` 对应「任务负载分」数字字段，`rule_explanation` 对应「匹配结果」文本字段，`attachments` 对应附件字段。`config/rule_fields.json` 映射规则表的类型、内容、部门、默认等级、调整说明、分配方式和人员负载分数，每次任务重新读取。规则表与需求表位于同一 Base。
 
-程序按需求「部门」单选值精确筛选规则，「平台」用于提供业务背景。规则「适用部门」支持多选标签与分隔文本，类型和等级支持单选标签。需求部门缺失或无效时，模型只能列候选并要求补充部门；不根据平台或提交人姓名推测部门。已确认部门后仅向模型发送该部门适用的规则，输出再次校验。规则名称可以相同，规则 ID 必须唯一；回写文本展示具体规则 ID、内容、部门和分配方式。
+程序按需求「部门」单选值精确筛选规则，「平台」用于提供业务背景。规则「适用部门」支持多选标签与分隔文本，类型和等级支持单选标签。需求部门缺失或无效时，模型只能列候选并要求补充部门；不根据平台或提交人姓名推测部门。已确认部门后仅向模型发送该部门适用的规则，输出再次校验。规则名称可以相同，规则 ID 必须唯一；回写文本展示匹配类型与具体工作内容，规则 ID 保存在服务日志中。
 
 在适用部门范围内，标题或需求说明明确命中「包含的工作」关键词时优先匹配；更具体的工作描述优先于宽泛相关项。未提供套版等细节时使用规则默认等级，明确符合调整条件才升降档。仅在实际多规则歧义、信息过少或内容冲突时返回候选，不猜测需求未提到的使用场景。
 
 `prompts/classify.md` 保存判断要求及 JSON 输出协议。输出包括 `matched`、`department`、`rule_id`、`level`、`work_type`、`reason`、`candidates`、`unmatched_reason`、`missing_information`。程序只校验结构和引用一致性，具体分档准确性需要业务样本验证。
 
-默认最多 8 张图片，单张 10 MiB，总计 20 MiB，可通过 `MAX_IMAGES`、`MAX_IMAGE_BYTES`、`MAX_TOTAL_IMAGE_BYTES` 调整；编码后的完整模型请求限制为 45 MiB。任一附件不支持、过大或下载失败时，向模型明确传入材料缺口；只允许输出候选，禁止基于部分材料给出确定评级。
+默认最多 32 张图片，单张 10 MiB，总计 20 MiB，可通过 `MAX_IMAGES`、`MAX_IMAGE_BYTES`、`MAX_TOTAL_IMAGE_BYTES` 调整；编码后的完整模型请求限制为 45 MiB。参与识别的附件不支持、过大或下载失败时，向模型明确传入材料缺口；只允许输出候选，禁止基于部分材料给出确定评级。
 
 模型接口参考：[JSON 输出](https://api-docs.deepseek.com/guides/json_mode/)、[图片输入](https://api-docs.deepseek.com/guides/vision/)。
 
@@ -146,3 +146,13 @@ docker compose logs -f design-task-dispatch
 `.env` 使用简单键值，保存凭证、Base Token、表 ID、模型接口、超时重试及路径等运行参数，`.env.example` 提供模板。`config/recommendation.json` 的 `members` 保存昵称到用户 ID 的映射，`ownership_routes` 保存规则记录 ID 到 `product`、`shop` 或 `product_platform` 的映射；字段映射、名单及分配规则也在容器外 JSON 中维护，每次任务重新读取。修改 `.env` 后重建容器以加载新值。
 
 应用需具备成员负荷表和跨 Base 数据包分配表读取权限。部署时同步 `.env`、 `config/recommendation.json` 和 `config/fields.json`；Compose 的现有目录挂载与缓存卷即可使用。
+
+## 需求文档读取
+
+`config/fields.json` 的 `document_link` 对应「需求文档链接」。该字段选填，填写允许域名下的飞书 `/sheets/` 链接。应用通过官方导出接口获取完整 XLSX，再与本地附件共用解析流程；查询参数中的当前工作表不会限制读取范围。应用须有导出云文档权限，以及目标表格的阅读和导出权限。
+
+`config/materials.json` 每次任务加载，随 config 目录挂载到容器外，配置文件大小、页数、工作表数、文本量、图片缩放、导出等待和域名范围。默认最多 10 个文档与图片文件，单文件 64 MiB、合计 128 MiB；Excel 解压总量 256 MiB、20 张可见工作表、10 万个单元格；PDF 20 页；文本总量 6 万字符。图片限额通过现有 `MAX_IMAGES` 等配置控制，文档内图片与普通附件共享限额。
+
+XLSX 读取可见工作表的缓存单元格值、批注、合并范围和锚定图片；不执行宏、公式或外部链接，隐藏页按配置跳过。缺失公式缓存、图表、特殊单元格图片或嵌入对象会提示材料缺口。PDF 逐页提取文字并渲染页面，扫描页直接交给视觉模型。加密、损坏、超限或权限不足均明确进入待确认，不声称完整读取。
+
+上线时同步 `config/materials.json`、`config/fields.json` 和 `prompts/classify.md`，环境变量保持服务器路径。所需依赖随镜像安装。

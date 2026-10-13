@@ -11,7 +11,7 @@ from app.ai import AIClient, validate_result
 from app.config import ROOT, Settings
 from app.dispatch import process_record
 from app.feishu import FeishuClient
-from app.materials import collect_images
+from app.materials import collect_materials
 from app.rules import normalize_rules, select_department, format_result
 
 MAPPING = {"title": "标题", "description": "说明", "attachments": "材料", "platform": "平台",
@@ -76,7 +76,7 @@ def test_missing_input_writes_review_without_ai(feishu, monkeypatch):
 def test_unsupported_attachment_provides_candidates(feishu, monkeypatch):
     classify = Mock(return_value=REVIEW)
     monkeypatch.setattr(AIClient, "classify", classify)
-    feishu.get_record.return_value["材料"] = [{"file_token": "file", "type": "application/pdf"}]
+    feishu.get_record.return_value["材料"] = [{"file_token": "file", "type": "application/msword"}]
     process_record("recTest", MAPPING, feishu)
     assert "附件 1" in classify.call_args.args[0]["material_issues"][0]
     assert "待确认｜测试类型" in feishu.update_record.call_args.args[1]["结果"]
@@ -116,12 +116,13 @@ def test_ai_retries_transient_failure_and_sends_json_images(settings, monkeypatc
     post = Mock(side_effect=[httpx.Response(429), response])
     monkeypatch.setattr("app.ai.httpx.post", post)
     monkeypatch.setattr("app.ai.time.sleep", Mock())
-    images = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}]
+    images = [{"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,abc"}}]
     result = AIClient(settings).classify({"title": "测试"}, RULES, OPTIONS, images, "测试部")
     assert result == RATED and post.call_count == 2
     payload = post.call_args.kwargs["json"]
     assert payload["messages"][1]["content"][1:] == images
     assert payload["response_format"] == {"type": "json_object"}
+    assert payload["max_tokens"] == settings.ai_max_tokens
 
 
 @pytest.mark.parametrize("response", [
@@ -162,15 +163,20 @@ def test_pagination_and_repeated_cursor(settings, monkeypatch):
 
 def test_image_limits_content_and_download_errors(feishu):
     feishu.settings = replace(feishu.settings, max_images=1)
-    feishu.download_image.return_value = b"\x89PNG\r\n\x1a\ncontent"
+    from PIL import Image
+    from io import BytesIO
+    output = BytesIO()
+    Image.new("RGB", (10, 10), "white").save(output, format="PNG")
+    feishu.download_attachment.return_value = output.getvalue()
     item = {"file_token": "file", "type": "image/png", "size": 20}
-    images, issues = collect_images([item, item], "recTest", "fldImage", feishu)
+    bundle = collect_materials([item, item], None, "recTest", "fldImage", feishu)
+    images, issues = bundle.images, bundle.issues
     assert len(images) == 1 and len(issues) == 1
-    assert "data:image/png;base64," in images[0]["image_url"]["url"]
-    feishu.download_image.return_value = b"not an image"
-    assert collect_images([item], "recTest", "fldImage", feishu)[1]
-    feishu.download_image.side_effect = RuntimeError("下载失败")
-    assert collect_images([item], "recTest", "fldImage", feishu)[1]
+    assert "data:image/jpeg;base64," in images[0]["image_url"]["url"]
+    feishu.download_attachment.return_value = b"not an image"
+    assert collect_materials([item], None, "recTest", "fldImage", feishu).issues
+    feishu.download_attachment.side_effect = RuntimeError("下载失败")
+    assert collect_materials([item], None, "recTest", "fldImage", feishu).issues
 
 
 def test_download_stream_limit_and_permission_context(settings, monkeypatch):
@@ -184,7 +190,7 @@ def test_download_stream_limit_and_permission_context(settings, monkeypatch):
     stream = Mock(return_value=context)
     monkeypatch.setattr("app.feishu.httpx.stream", stream)
     with pytest.raises(ValueError, match="大小"):
-        client.download_image("file", "recTest", "fldImage", 5)
+        client.download_attachment("file", "recTest", "fldImage", 5)
     extra = json.loads(stream.call_args.kwargs["params"]["extra"])
     assert extra["bitablePerm"]["attachments"] == {"fldImage": {"recTest": ["file"]}}
 
@@ -394,3 +400,21 @@ def test_compact_match_adjustment_and_duplicate_candidates():
     output = format_result(result, RULES + [second])
     assert '测试类型（测试工作） / 测试类型（另一工作）' in output
     assert 'recRule' not in output and 'second' not in output
+
+
+def test_pipeline_includes_document_materials(feishu, monkeypatch):
+    """确认真实字段映射贯通文档读取与模型请求。"""
+    from test_materials import workbook_bytes
+
+    mapping = MAPPING | {"document_link": "需求文档链接"}
+    feishu.get_fields.return_value = SCHEMA + [{"field_name": "需求文档链接", "type": 15}]
+    feishu.get_record.return_value["需求文档链接"] = {"link": "https://kocotree.feishu.cn/sheets/abc"}
+    feishu.export_sheet.return_value = workbook_bytes()
+    classify = Mock(return_value=RATED)
+    monkeypatch.setattr(AIClient, "classify", classify)
+    process_record("recTest", mapping, feishu)
+    demand = classify.call_args.args[0]
+    assert any("请制作商品主图" in part["text"] for part in demand["materials"])
+    assert not demand["material_issues"]
+    assert len(classify.call_args.args[3]) == 1
+    assert feishu.update_record.call_args.args[1]["分数"] == 2

@@ -80,7 +80,7 @@ class AIClient:
             "model": settings.ai_model,
             "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": content}],
             "response_format": {"type": "json_object"},
-            "max_tokens": 8192,
+            "max_tokens": settings.ai_max_tokens,
             "thinking": {"type": "enabled"},
         }
         # Base64 会放大附件体积，在发送前检查完整请求，避免接口拒收。
@@ -99,6 +99,7 @@ class AIClient:
                     try:
                         choice = response.json()["choices"][0]
                         if choice.get("finish_reason") != "stop":
+                            logger.warning("AI 输出未完整结束：finish_reason=%s max_tokens=%d", choice.get("finish_reason"), settings.ai_max_tokens)
                             raise ValueError("AI 输出未完整结束")
                         result = json.loads(choice["message"]["content"])
                     except (KeyError, IndexError, TypeError, ValueError):

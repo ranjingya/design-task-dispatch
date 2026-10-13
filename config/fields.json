@@ -18,5 +18,6 @@
   "load_score": "任务负载分",
   "recommendation_result": "推荐结果",
   "cancelled": "是否取消",
-  "is_test": "是否测试"
+  "is_test": "是否测试",
+  "document_link": "需求文档链接"
 }

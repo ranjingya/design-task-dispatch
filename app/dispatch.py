@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from app.ai import AIClient
-from app.materials import collect_images
+from app.materials import collect_materials
 from app.config import Settings, load_fields
 from app.feishu import FeishuClient
 from app.rules import select_department, review, format_result, load_score
@@ -60,11 +60,16 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
             attachment_field = schema.get(attachment_name, {})
             if attachment_name and attachment_field.get("type") != 17:
                 raise ValueError("附件字段映射无效")
-            images, issues = collect_images(fields.get(attachment_name) or [], record_id,
-                                            attachment_field.get("field_id", ""), feishu)
+            document_name = mapping.get("document_link")
+            if document_name and schema.get(document_name, {}).get("type") != 15:
+                raise ValueError("需求文档链接需为超链接字段，请核对字段映射")
+            material = collect_materials(fields.get(attachment_name) or [], fields.get(mapping.get("document_link")),
+                                         record_id, attachment_field.get("field_id", ""), feishu)
+            demand["materials"] = material.texts
+            demand["image_sources"] = material.image_sources
             # 未读取的材料显式传入，让模型列出候选；程序禁止此时给出确定评级。
-            demand["material_issues"] = issues
-            result = AIClient(feishu.settings).classify(demand, eligible, options, images, department)
+            demand["material_issues"] = material.issues
+            result = AIClient(feishu.settings).classify(demand, eligible, options, material.images, department)
         score = None
         rule = None
         explanation = format_result(result, rules)

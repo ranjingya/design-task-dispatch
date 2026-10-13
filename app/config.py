@@ -34,7 +34,9 @@ class Settings:
     rules_cache_path: Path = ROOT / ".cache/rules.json"
     ai_timeout: float = 90
     ai_attempts: int = 3
-    max_images: int = 8
+    ai_max_tokens: int = 16384
+    materials_path: Path = ROOT / "config/materials.json"
+    max_images: int = 32
     max_image_bytes: int = 10 * 1024 * 1024
     max_total_image_bytes: int = 20 * 1024 * 1024
 
@@ -65,7 +67,9 @@ class Settings:
             rules_cache_path=Path(os.getenv("RULES_CACHE_PATH", str(ROOT / ".cache/rules.json"))),
             ai_timeout=float(os.getenv("AI_TIMEOUT_SECONDS", "90")),
             ai_attempts=int(os.getenv("AI_MAX_ATTEMPTS", "3")),
-            max_images=int(os.getenv("MAX_IMAGES", "8")),
+            ai_max_tokens=int(os.getenv("AI_MAX_OUTPUT_TOKENS", "16384")),
+            materials_path=Path(os.getenv("MATERIALS_CONFIG_PATH", str(ROOT / "config/materials.json"))),
+            max_images=int(os.getenv("MAX_IMAGES", "32")),
             max_image_bytes=int(os.getenv("MAX_IMAGE_BYTES", str(10 * 1024 * 1024))),
             max_total_image_bytes=int(os.getenv("MAX_TOTAL_IMAGE_BYTES", str(20 * 1024 * 1024))),
         )
@@ -81,6 +85,8 @@ class Settings:
             raise ValueError("DEEPSEEK_BASE_URL 必须是无凭证、查询参数的 HTTPS 接口地址")
         if not 0 < self.ai_timeout <= 300 or not 1 <= self.ai_attempts <= 3:
             raise ValueError("AI 超时需在 0 至 300 秒之间，总尝试次数需在 1 至 3 之间")
+        if not 1024 <= self.ai_max_tokens <= 32768:
+            raise ValueError("AI 输出额度需在 1024 至 32768 之间")
         if min(self.max_images, self.max_image_bytes, self.max_total_image_bytes) <= 0:
             raise ValueError("图片数量和大小限制必须为正数")
 
