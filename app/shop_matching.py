@@ -83,28 +83,34 @@ def resolve_shop(demand, config, settings=None):
     enabled = config.get('shop_ai_fallback', False)
     if type(enabled) is not bool:
         raise ValueError('shop_ai_fallback 必须为布尔值')
-    # AI 识别及平台过滤要求目录具备稳定的店铺 ID。
+    # 旧配置仍可执行明确别名匹配；AI 识别必须具备稳定的店铺 ID。
     if enabled or platforms:
         validate_catalog(shops, platforms)
     candidates = [s for s in shops if s['department'] == plain(demand.get('department'))]
     sources = sources_for(demand)
-    # 只有平台字段明确指定平台时才收窄范围，正文中的平台可能属于参考店铺。
-    platform_text = sources.get('platform', '')
+    platform_text = sources.get('platform', '') or ' '.join(sources.get(k, '') for k in ('title', 'description'))
     normalized = normalize(platform_text, platforms)
     known = [name for name in platforms if compact(name) in normalized]
     if len(known) > 1:
-        return None, '平台字段涉及多个平台，请确认本次目标店铺', candidates
+        return None, '需求涉及多个平台，请确认本次目标店铺', candidates
+    # 文档可能包含竞品或参考店铺，交给模型结合上下文识别，不能仅凭出现名称归属。
+    matches = exact_shops({k: v for k, v in sources.items() if not k.startswith('material_')}, candidates, platforms)
     if known:
         candidates = [s for s in candidates if s.get('platform', '') in ('', known[0])]
-    # 直接采用必须是整字段等于完整店名；简称、修饰语及否定句交给 AI 判断。
-    direct = [s for s in candidates if normalized and normalized ==
-              normalize(s.get('name', s['aliases'][0]), platforms)]
-    if len(direct) == 1:
-        shop = direct[0]
+        explicit_conflicts = [s for s in matches if s not in candidates and any(
+            compact(s.get('platform', '')) in normalize(alias, platforms) and
+            exact_shops({k: v for k, v in sources.items() if not k.startswith('material_')},
+                        [dict(s, aliases=[alias])], platforms)
+            for alias in s['aliases']
+        )]
+        if explicit_conflicts:
+            return None, '店铺名称与填写的平台冲突，请确认目标店铺', candidates
+        matches = [s for s in matches if s in candidates]
+    if len(matches) == 1:
+        shop = matches[0]
         name = shop.get('name', shop['aliases'][0])
-        logger.info('店铺识别 方式=平台完整店名 店铺=%s', name)
-        return shop, f'平台字段指定店铺：{name}', candidates
-    matches = exact_shops(sources, candidates, platforms)
+        logger.info('店铺识别 方式=别名 店铺=%s', name)
+        return shop, f'名称／别名匹配：{name}', candidates
     if not candidates:
         return None, '当前部门和平台没有已配置店铺，请补充店铺配置', []
     fallback = '需求同时提到多家店铺，请确认本次目标店铺' if matches else '缺少可唯一识别的店铺名称，请补充店铺名称或用途'
@@ -139,7 +145,7 @@ def resolve_shop(demand, config, settings=None):
         if shop is None or not isinstance(evidence, dict):
             raise ValueError('模型返回未知店铺或缺少原文证据')
         source, quote = evidence.get('source'), evidence.get('quote')
-        if not isinstance(source, str) or source not in sources or not isinstance(quote, str) or not quote.strip() or len(quote) > 500 or quote not in sources[source]:
+        if not isinstance(source, str) or source == 'platform' or source not in sources or not isinstance(quote, str) or not quote.strip() or len(quote) > 500 or quote not in sources[source]:
             raise ValueError('店铺识别证据不属于本次需求原文')
         if compact(quote) in {compact(name) for name in platforms} or normalize(quote, platforms) in {compact(name) for name in platforms}:
             raise ValueError('仅凭平台不能确定店铺')
