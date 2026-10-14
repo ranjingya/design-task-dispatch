@@ -321,3 +321,21 @@ def test_team_reservation_then_final_assignee_and_cancellation(client):
     record['fields']['取消'] = True
     loads = workloads([record], M, ['a', 'b'], 'next')
     assert [loads[uid]['score'] for uid in ('a', 'b')] == [0, 0]
+
+
+@pytest.mark.parametrize('owner,backups,expected', [
+    ('乙', ['甲'], ['b', 'a']),
+    ('甲', ['乙', '甲', '乙'], ['a', 'b']),
+    ('甲', [], ['a']),
+])
+def test_shop_team_order_and_dedup(client, owner, backups, expected):
+    """主副顺序来自配置，重复人员不产生重复推荐。"""
+    path = client.settings.fields_path.parent / 'recommendation.json'
+    config = json.loads(path.read_text())
+    config['shops'][0].update(primary=owner, backup=backups)
+    path.write_text(json.dumps(config))
+    updates, state = run(client, '找对应人员', 'shop', {'department': '部门甲', 'title': '店铺一'})
+    assert updates['推荐人'] == [{'id': uid} for uid in expected]
+    assert state is None
+    loads = workloads([row('new', 推荐人=updates['推荐人'], 分数=4)], M, ['a', 'b'], 'self')
+    assert all(loads[uid]['score'] == 4 for uid in expected)
