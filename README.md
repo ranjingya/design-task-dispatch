@@ -226,7 +226,7 @@ docker exec design-task-dispatch /app/.venv/bin/python -m app.cli retry <记录I
 
 通知应用在 `.env` 中配置 `FEISHU_ALERT_APP_ID`、`FEISHU_ALERT_APP_SECRET`，需启用机器人能力和 `im:message:send_as_bot` 权限，接收人须处于应用可用范围。数据读取使用 `FEISHU_DATA_APP_ID`、`FEISHU_DATA_APP_SECRET`。消息接口说明见[飞书发送消息文档](https://open.feishu.cn/document/server-docs/im-v1/message/create)。
 
-`config/notifications.toml` 与字段映射放在同一目录，随现有 config 目录只读挂载，每次通知读取。`new_task.enabled` 控制新增通知总开关；每个 `[[new_task.recipients]]` 包含显示名称 `name`、通知应用下的 Open ID `open_id` 和启用开关 `enabled`。这里填写 `ou_` 开头的 Open ID，须属于 `FEISHU_ALERT_APP_ID` 对应的应用。卡片中的人员引用通过 Union ID 查询通知应用下的 Open ID；通知应用需开通 `contact:contact.base:readonly` 应用身份权限，查询失败时用姓名展示。当前配置仅启用鸭腿，软糖和饭团保留为关闭状态；启用相应条目后，下一条新增需求生效。
+`config/notifications.toml` 与字段映射放在同一目录，随现有 config 目录只读挂载，每次通知读取。`new_task.enabled` 控制新增通知总开关；每个 `[[new_task.recipients]]` 包含显示名称 `name`、通知应用下的 Open ID `open_id` 和启用开关 `enabled`。这里填写 `ou_` 开头的 Open ID，须属于 `FEISHU_ALERT_APP_ID` 对应的应用。卡片中的人员引用通过 Union ID 查询通知应用下的 Open ID；通知应用需开通 `contact:contact.base:readonly` 应用身份权限，查询失败时用姓名展示。当前新增通知接收人为软糖、饭团和鸭腿，三人均已启用；配置修改在下一次通知时生效。
 
 发送记录保存在规则缓存目录下的 `notifications/`，Docker 中为持久化卷 `/app/cache/notifications/`，由容器用户写入，消息状态文件权限为 0600。按通知应用、Base、表、记录和接收人去重，成功通知在重跑和容器重建后均跳过。网络瞬时故障最多请求三次，复用同一消息 UUID。发送结果未知且超过飞书一小时去重窗口时停止自动补发，需要核对聊天记录与缓存后处理；缓存损坏时同样停止发送。不要清理通知缓存，否则会失去已发送记录。
 

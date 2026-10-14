@@ -5,12 +5,12 @@ enabled = true
 [[new_task.recipients]]
 name = "软糖"
 open_id = "ou_afa34b7ebd0777a481a6bf4d87e04c70"
-enabled = false
+enabled = true
 
 [[new_task.recipients]]
 name = "饭团"
 open_id = "ou_6acfdbc81b7bf710ecf81bea7e0ceb27"
-enabled = false
+enabled = true
 
 [[new_task.recipients]]
 name = "鸭腿"
