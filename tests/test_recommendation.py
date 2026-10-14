@@ -111,7 +111,9 @@ def test_manual_unconfigured_and_excluded_owner(client):
 def test_shop_owner_preserved_despite_load(client):
     client.data['tasks'] = [row('busy', 推荐人=[{'id': 'a'}], 分数=80)]
     updates, _ = run(client, '找对应人员', 'shop', {'department': '部门甲', 'platform': '店铺一'})
-    assert updates['推荐人'] == [{'id': 'a'}] and '乙' in updates['说明']
+    assert updates['推荐人'] == [{'id': 'a'}, {'id': 'b'}]
+    assert updates['说明'].split('\n\n')[2] == '甲 80 ｜ 乙 0'
+    assert '主副负责人' in updates['说明']
 
 
 @pytest.mark.parametrize('fields', [{'负责人': [{'id': 'a'}]}, {'确认': True}, {'取消': True}, {'完成': 123}])
@@ -281,3 +283,41 @@ def test_sequential_recommendations_reserve_load_and_rotate(client):
         'a': {'score': 8, 'count': 2, 'missing': []},
         'b': {'score': 8, 'count': 2, 'missing': []},
     }
+
+
+@pytest.mark.parametrize('backups,expected', [([], ['a']), (['乙', '甲', '乙'], ['a', 'b']), (['未配置'], [])])
+def test_shop_team_order_dedup_and_unknown_member(client, backups, expected):
+    path = client.settings.fields_path.parent / 'recommendation.json'
+    config = json.loads(path.read_text())
+    config['shops'][0]['backup'] = backups
+    path.write_text(json.dumps(config))
+    updates, pending = run(client, '找对应人员', 'shop', {'department': '部门甲', 'platform': '店铺一'})
+    assert updates['推荐人'] == [{'id': uid} for uid in expected]
+    assert pending is None
+
+
+def test_shop_multiple_deputies_follow_configuration_order(client):
+    path = client.settings.fields_path.parent / 'recommendation.json'
+    config = json.loads(path.read_text())
+    config['members']['丙'] = 'c'
+    config['rotation'].append('丙')
+    config['shops'][0]['backup'] = ['丙', '乙']
+    path.write_text(json.dumps(config))
+    client.data['members'].append(row('c', 人员=[{'id': 'c'}]))
+    updates, _ = run(client, '找对应人员', 'shop', {'department': '部门甲', 'platform': '店铺一'})
+    assert updates['推荐人'] == [{'id': 'a'}, {'id': 'c'}, {'id': 'b'}]
+    assert updates['说明'].split('\n\n')[2] == '甲 0 ｜ 丙 0 ｜ 乙 0'
+
+
+def test_team_reservation_then_final_assignee_and_cancellation(client):
+    updates, _ = run(client, '找对应人员', 'shop', {'department': '部门甲', 'platform': '店铺一'})
+    record = row('team', 推荐人=updates['推荐人'], 分数=4)
+    loads = workloads([record], M, ['a', 'b'], 'next')
+    assert [loads[uid]['score'] for uid in ('a', 'b')] == [4, 4]
+    assert [loads[uid]['count'] for uid in ('a', 'b')] == [1, 1]
+    record['fields'].update(确认=True, 负责人=[{'id': 'b'}])
+    loads = workloads([record], M, ['a', 'b'], 'next')
+    assert [loads[uid]['score'] for uid in ('a', 'b')] == [0, 4]
+    record['fields']['取消'] = True
+    loads = workloads([record], M, ['a', 'b'], 'next')
+    assert [loads[uid]['score'] for uid in ('a', 'b')] == [0, 0]

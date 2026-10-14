@@ -117,11 +117,14 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
     names, loads, candidates = {}, {}, []
 
     def answer(reason, uid=None, state=None, mode='人工分配', people=None):
-        task_details(recommended=next((name for name, value in names.items() if value == uid), '人工分配'))
+        """按传入顺序回写单人或多人推荐，重复人员仅保留第一次出现的位置。"""
+        ids = list(dict.fromkeys(uid if isinstance(uid, list) else [uid] if uid else []))
+        labels = {value: name for name, value in names.items()}
+        task_details(recommended='、'.join(labels[value] for value in ids) if ids else '人工分配')
         logger.debug('人员推荐完成：record_id=%s recommended=%s reason=%s', record_id, bool(uid), reason)
         summary = people if people is not None else (describe(candidates) if loads else '人员负载未比较')
         text = format_recommendation(mode, reason, summary, score)
-        return {result_field: text, person_field: [{'id': uid}] if uid else []}, state
+        return {result_field: text, person_field: [{'id': value} for value in ids]}, state
 
     if not rule or score is None:
         return answer('未准确匹配规则，暂时无法推荐' if not rule else '规则负载分缺失或无效，请补充分数')
@@ -178,8 +181,9 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
             owner, backups = shop['primary'], shop['backup']
             if any(n not in names for n in [owner] + backups):
                 return answer('店铺团队存在未配置成员，需人工确认')
-            return answer(f"{shop.get('name', shop['aliases'][0])}，{basis}；主负责人优先，备选供组长调整", names[owner], mode='对应人员',
-                          people=describe([owner]) + (' ｜ 备选：' + describe(backups) if backups else ''))
+            team = list(dict.fromkeys([owner] + backups))
+            return answer(f"{shop.get('name', shop['aliases'][0])}，{basis}；按主副负责人顺序推荐",
+                          [names[name] for name in team], mode='对应人员', people=describe(team))
         policy = None
         if route == 'product_platform':
             policies = config.get('product_platform_rules', {}).get(rule['record_id'], [])
