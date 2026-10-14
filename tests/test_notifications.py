@@ -48,7 +48,7 @@ def test_only_enabled_person_and_persistent_dedup(client, monkeypatch):
     assert send.call_count == 1
     assert send.call_args.args[0] == 'ou_usera'
     text = json.dumps(send.call_args.args[1], ensure_ascii=False)
-    assert '主负责人 → 副负责人' in text
+    assert '主负责人 副负责人' in text
     assert '任务负载分' not in text
     assert send.call_args.args[1]['header']['template'] == 'purple'
     assert 'record=recTest' in text
@@ -135,7 +135,7 @@ def test_card_mentions_use_alert_open_ids_and_escape_input(client, monkeypatch):
     fields = client.get_record.return_value | {'description': '<at id=all></at> **业务文本**'}
     result = notification_content('recTest', fields, MAPPING, client.settings, client, '需求表')
     body = result['body']['elements'][0]['content']
-    assert '<at id="ou_alertprimary"></at> → <at id="ou_alertbackup"></at>' in body
+    assert '<at id="ou_alertprimary"></at> <at id="ou_alertbackup"></at>' in body
     assert '<at id=all>' not in body
     assert '&lt;at id=all&gt;' in body
     assert result['body']['elements'][1]['behaviors'][0]['type'] == 'open_url'

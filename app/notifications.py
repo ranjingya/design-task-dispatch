@@ -85,7 +85,7 @@ def notification_content(record_id, fields, mapping, settings, feishu, source_na
             except Exception:
                 logger.warning("通知人员引用不可用，使用姓名展示")
                 result.append(escape_text(person["name"]))
-        return " → ".join(result)
+        return " ".join(result)
 
     if not value("rule_explanation") or not value("recommendation_result"):
         raise ValueError("匹配与推荐结果尚未就绪，暂不发送通知")
@@ -95,8 +95,8 @@ def notification_content(record_id, fields, mapping, settings, feishu, source_na
         ("任务名称", escape_text(value("title")) or "未命名需求"),
         ("需求说明", escape_text(value("description")) or "未填写"),
         ("需求人员", people("submitter") or "未填写"),
-        ("所属平台", escape_text(value("platform")) or "未填写"),
         ("推荐负责人", people("recommended_assignee") or "待人工分配"),
+        ("所属平台", escape_text(value("platform")) or "未填写"),
     ]
     base = quote(settings.base_token, safe="")
     table = quote(settings.table_id, safe="")
