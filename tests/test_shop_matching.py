@@ -43,24 +43,26 @@ def test_normalize_fullwidth_punctuation_and_ascii_boundary():
 
 def test_direct_match_and_department_filter(config, model, settings):
     config['shops'][2]['aliases'] = ['平台乙服饰店']
-    shop, reason, _ = resolve_shop({'department': '部门甲', 'platform': 'AA', 'title': 'ＡＡ服饰店装修'}, config, settings)
-    assert shop['id'] == 'one' and '别名' in reason
+    shop, reason, _ = resolve_shop({'department': '部门甲', 'platform': 'ＡＡ儿童服饰旗舰店', 'title': '页面装修'}, config, settings)
+    assert shop['id'] == 'one' and '平台字段' in reason
     model.assert_not_called()
     assert resolve_shop({'department': '部门乙', 'title': '平台甲服饰店装修'}, config, settings)[0] is None
 
 
-def test_shared_short_name_filtered_by_platform(config, model, settings):
-    config['shops'][0]['aliases'].append('服饰店')
-    # 同名简称只有在平台内唯一时才采用。
-    shop, _, _ = resolve_shop({'department': '部门甲', 'platform': 'AA', 'title': '服饰店装修'}, config, settings)
-    assert shop is not None and shop['id'] == 'one'
-    model.assert_not_called()
+def test_short_name_requires_ai_even_when_unique(config, model, settings):
+    model.return_value[0]['evidence'] = {'source': 'platform', 'quote': 'AA服饰店'}
+    shop, _, _ = resolve_shop({'department': '部门甲', 'platform': 'AA服饰店'}, config, settings)
+    assert shop['id'] == 'one'
+    model.assert_called_once()
 
 
-def test_explicit_platform_conflict_never_uses_ai(config, model, settings):
-    shop, reason, _ = resolve_shop({'department': '部门甲', 'platform': 'BB', 'title': '平台甲服饰店装修'}, config, settings)
-    assert shop is None and '冲突' in reason
-    model.assert_not_called()
+def test_cross_platform_reference_requires_context(config, model, settings):
+    model.return_value = ({'status': 'matched', 'shop_id': 'three', 'reason': '乙店为目标，甲店仅参考',
+                          'evidence': {'source': 'description', 'quote': '给平台乙服饰店做页面'}}, {})
+    shop, _, _ = resolve_shop({'department': '部门甲', 'platform': 'BB',
+                              'title': '参考平台甲服饰店', 'description': '给平台乙服饰店做页面'}, config, settings)
+    assert shop['id'] == 'three'
+    model.assert_called_once()
 
 
 def test_multiple_platforms_stays_manual(config, model, settings):
@@ -122,7 +124,26 @@ def test_invalid_catalog_rejected(config, settings):
 
 def test_current_demand_resolves_to_configured_owner():
     config = json.loads((ROOT / 'config/recommendation.json').read_text())
-    for title in ('拼多多服饰店-秋冬页面装修', 'pdd服饰店', 'ＰＤＤ服饰店'):
-        shop, _, _ = resolve_shop({'department': '市场部', 'platform': '拼多多', 'title': title}, config)
-        assert shop['name'] == '拼多多儿童服饰旗舰店'
-        assert shop['primary'] == '蛋糕' and shop['backup'] == ['塔可']
+    shop, _, _ = resolve_shop({'department': '市场部', 'platform': 'ＰＤＤ儿童服饰旗舰店'}, config)
+    assert shop['name'] == '拼多多儿童服饰旗舰店'
+    assert shop['primary'] == '蛋糕' and shop['backup'] == ['塔可']
+
+
+@pytest.mark.parametrize('field', ['title', 'description', 'notes', 'platform'])
+def test_reference_or_negated_alias_never_direct_matches(config, model, settings, field):
+    model.return_value = ({'status': 'needs_review', 'shop_id': None, 'reason': '仅有参考店铺，缺少目标', 'evidence': None}, {})
+    shop, reason, _ = resolve_shop({'department': '部门甲', field: '不要分给平台甲儿童服饰旗舰店，只是参考'}, config, settings)
+    assert shop is None and '缺少目标' in reason
+    model.assert_called_once()
+
+
+def test_title_platform_does_not_hide_target_candidates(config, model, settings):
+    resolve_shop({'department': '部门甲', 'title': '参考平台甲服饰店', 'description': '童装那家店'}, config, settings)
+    payload = json.loads(model.call_args.args[0][1]['content'])
+    assert {shop['id'] for shop in payload['candidates']} == {'one', 'two', 'three'}
+    assert payload['confirmed_platform'] is None
+
+
+def test_title_alias_with_ai_disabled_stays_manual(config):
+    config['shop_ai_fallback'] = False
+    assert resolve_shop({'department': '部门甲', 'title': '平台甲儿童服饰旗舰店装修'}, config)[0] is None
