@@ -93,7 +93,7 @@ class Settings:
 
 def load_fields(path: Path) -> dict[str, str]:
     """功能说明：读取最新字段映射。参数 path：JSON 文件路径。返回值：内部名称到飞书字段名的映射。"""
-    logger.info("加载字段配置：%s", path)
+    logger.debug("加载字段配置：%s", path)
     try:
         mapping = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:

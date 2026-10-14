@@ -42,7 +42,7 @@ def load_score(value) -> int | float | None:
 
 def normalize_rules(records: list[dict], path: Path) -> list[dict]:
     """功能说明：按外部映射标准化规则。参数 records：飞书原始规则；path：规则字段映射路径。返回值：完整规则快照。"""
-    logger.info("加载规则字段配置：%s", path)
+    logger.debug("加载规则字段配置：%s", path)
     mapping = json.loads(path.read_text(encoding="utf-8"))
     required = {"work_type", "content", "departments", "default_level", "adjustment", "assignment", "load_score"}
     if not isinstance(mapping, dict) or not required <= mapping.keys() or any(
@@ -74,7 +74,7 @@ def select_department(value, rules: list[dict]) -> tuple[str | None, list[dict]]
     if len(selected) == 1 and selected[0] in departments:
         department = selected[0]
         eligible = [r for r in rules if department in r["departments"]]
-        logger.info("部门筛选完成：department=%s rule_count=%d", department, len(eligible))
+        logger.debug("部门筛选完成：department=%s rule_count=%d", department, len(eligible))
         return department, eligible
     logger.warning("需求部门缺失、无效或不是单一部门：value_count=%d", len(selected))
     return None, rules
@@ -94,7 +94,7 @@ def format_result(result: dict, rules: list[dict]) -> str:
     compact = lambda text: ' '.join(str(text or '').split())
     if result['matched']:
         rule = by_id[result['rule_id']]
-        logger.info('规则匹配结果：rule_id=%s level=%s reason=%s', result['rule_id'], result['level'], result['reason'])
+        logger.debug('规则匹配结果：rule_id=%s level=%s reason=%s', result['rule_id'], result['level'], result['reason'])
         lines = [f"已匹配｜{rule['work_type']}", '对应：' + compact(rule['content'])]
         if result['level'] != rule['default_level']:
             lines.append(f"调整为 {result['level']}：{compact(result['reason'])}")
@@ -107,5 +107,5 @@ def format_result(result: dict, rules: list[dict]) -> str:
     lines = ['待确认｜' + (' / '.join(labels) if labels else '暂无明确候选'), compact(result['unmatched_reason'])]
     if result['missing_information']:
         lines.append('需补充：' + '；'.join(compact(v) for v in result['missing_information']))
-    logger.info('规则待确认：candidates=%s reason=%s', result['candidates'], result['unmatched_reason'])
+    logger.debug('规则待确认：candidates=%s reason=%s', result['candidates'], result['unmatched_reason'])
     return '\n\n'.join(lines)

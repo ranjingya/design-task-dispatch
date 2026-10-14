@@ -32,16 +32,16 @@ def load_daily_rules(feishu: FeishuClient) -> list[dict]:
         if not isinstance(cached_day, str):
             raise ValueError("规则缓存日期无效")
     except FileNotFoundError:
-        logger.info("规则缓存不存在，准备首次加载")
+        logger.debug("规则缓存不存在，准备首次加载")
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         cached_rules = None
         logger.warning("规则缓存不可用，准备重新加载")
     current_day = today()
     if cached_rules is not None and cached_day == current_day:
-        logger.info("复用本地规则快照：date=%s count=%d", cached_day, len(cached_rules))
+        logger.debug("复用本地规则快照：date=%s count=%d", cached_day, len(cached_rules))
         return cached_rules
     try:
-        logger.info("刷新每日规则快照：date=%s", current_day)
+        logger.debug("刷新每日规则快照：date=%s", current_day)
         records = feishu.get_rules()
         rules = normalize_rules(records, settings.rule_fields_path)
         snapshot = {"source": source, "date": current_day, "records": records}
@@ -58,7 +58,7 @@ def load_daily_rules(feishu: FeishuClient) -> list[dict]:
         finally:
             if temporary and os.path.exists(temporary):
                 os.unlink(temporary)
-        logger.info("规则快照保存完成：date=%s count=%d path=%s", current_day, len(rules), path)
+        logger.debug("规则快照保存完成：date=%s count=%d path=%s", current_day, len(rules), path)
         return rules
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, AttributeError):
         if cached_rules is None:

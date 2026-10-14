@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from app.rules import load_score, plain
+from app.task_logging import task_details
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,8 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
     names, loads, candidates = {}, {}, []
 
     def answer(reason, uid=None, state=None, mode='人工分配', people=None):
-        logger.info('人员推荐完成：record_id=%s recommended=%s reason=%s', record_id, bool(uid), reason)
+        task_details(recommended=next((name for name, value in names.items() if value == uid), '人工分配'))
+        logger.debug('人员推荐完成：record_id=%s recommended=%s reason=%s', record_id, bool(uid), reason)
         summary = people if people is not None else (describe(candidates) if loads else '人员负载未比较')
         text = format_recommendation(mode, reason, summary, score)
         return {result_field: text, person_field: [{'id': uid}] if uid else []}, state
@@ -126,7 +128,7 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
     if not rule or score is None:
         return answer('未准确匹配规则，暂时无法推荐' if not rule else '规则负载分缺失或无效，请补充分数')
     path = feishu.settings.fields_path.parent / 'recommendation.json'
-    logger.info('加载人员推荐配置：%s', path)
+    logger.debug('加载人员推荐配置：%s', path)
     config = json.loads(path.read_text(encoding='utf-8'))
     settings = feishu.settings
     if not settings.members_table_id:
@@ -191,14 +193,14 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
             policy = platform_policy(demand.get('platform'), policies)
             if not policy:
                 return answer('未能唯一确定平台，请补充明确的平台信息')
-            logger.info('平台推荐策略：record_id=%s action=%s', record_id, policy['action'])
+            logger.debug('平台推荐策略：record_id=%s action=%s', record_id, policy['action'])
         if route not in ('product', 'product_platform'):
             return answer('该规则尚未配置归属查询路径，需人工确认')
         if not settings.product_base_token or not settings.product_table_id:
             raise ValueError('请配置 FEISHU_PRODUCT_BASE_TOKEN 和 FEISHU_PRODUCT_TABLE_ID')
         p = config['product']
         owner, reason, fallback = product_owner(demand, feishu.get_records(settings.product_table_id, settings.product_base_token), p)
-        logger.info('商品归属查询：record_id=%s detail=%s', record_id, reason)
+        logger.debug('商品归属查询：record_id=%s detail=%s', record_id, reason)
         if owner in config['excluded_owners']:
             return answer(f'原认领人{owner}不在美工名单，由组长安排')
         if owner:
@@ -237,7 +239,7 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
     existing = user_ids(fields.get(person_field))
     winner = next((n for n in tied if names[n] in existing), tied[0])
     state[pool] = winner
-    logger.info('准备更新轮换位置：pool=%s winner=%s', pool, winner)
+    logger.debug('准备更新轮换位置：pool=%s winner=%s', pool, winner)
     pending = (state_path, state)
     return answer(source, names[winner], pending, mode=display_method)
 

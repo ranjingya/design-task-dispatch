@@ -72,7 +72,7 @@ class AIClient:
         settings = self.settings
         settings.validate_ai()
         started = time.monotonic()
-        logger.info("加载评级提示词：%s", settings.prompt_path)
+        logger.debug("加载评级提示词：%s", settings.prompt_path)
         prompt = settings.prompt_path.read_text(encoding="utf-8")
         if not prompt.strip():
             raise ValueError("评级提示词为空")
@@ -93,7 +93,7 @@ class AIClient:
             if selecting:
                 if selection_prompt is None:
                     selection_path = settings.prompt_path.with_name("select_images.md")
-                    logger.info("加载选图提示词：%s", selection_path)
+                    logger.debug("加载选图提示词：%s", selection_path)
                     selection_prompt = selection_path.read_text(encoding="utf-8")
                     if not selection_prompt.strip():
                         raise ValueError("选图提示词为空")
@@ -103,9 +103,11 @@ class AIClient:
                 content = json.loads(messages[-1]["content"][0]["text"])
                 content.update({"rules": rules, "allowed_work_types": options, "confirmed_department": department})
                 messages[-1]["content"][0]["text"] = json.dumps(content, ensure_ascii=False)
-            logger.info("AI 本轮阶段：round=%d phase=%s", number, "选图" if selecting else "评级")
-            logger.info("图片核对：round=%d new_images=%d sent_images=%d original_images=%d", number, len(batch), len(visual.sent), len(images))
-            logger.info("本轮图片编号：round=%d keys=%s", number, keys)
+            logger.debug("AI 本轮阶段：round=%d phase=%s", number, "选图" if selecting else "评级")
+            logger.debug("图片核对：round=%d new_images=%d sent_images=%d original_images=%d", number, len(batch), len(visual.sent), len(images))
+            if number > 1:
+                logger.info("补充图片 轮次=%d 新增=%d 累计=%d", number, len(batch), len(visual.sent))
+            logger.debug("本轮图片编号：round=%d keys=%s", number, keys)
             result, assistant = self._complete(messages)
             if not isinstance(result, dict):
                 raise ValueError("AI 输出不是 JSON 对象")
@@ -121,7 +123,7 @@ class AIClient:
                 if demand.get("material_issues") and result["matched"]:
                     raise ValueError("材料未完整读取时不得给出确定评级")
                 if not visual.pending():
-                    logger.info("AI 评级完成：matched=%s rounds=%d sent_images=%d elapsed=%.2fs", result["matched"], number, len(visual.sent), time.monotonic() - started)
+                    logger.debug("AI 评级完成：matched=%s rounds=%d sent_images=%d elapsed=%.2fs", result["matched"], number, len(visual.sent), time.monotonic() - started)
                     return result
             pending = visual.pending()
             if number == rounds or not pending:
@@ -156,7 +158,7 @@ class AIClient:
         if len(json.dumps(payload, ensure_ascii=False).encode()) > 45 * 1024 * 1024:
             raise ValueError("模型请求体超过大小限制")
         for attempt in range(1, settings.ai_attempts + 1):
-            logger.info("调用 AI：model=%s attempt=%d image_count=%d", settings.ai_model, attempt, sum(item.get("type") == "image_url" for msg in messages if isinstance(msg.get("content"), list) for item in msg["content"]))
+            logger.debug("调用 AI：model=%s attempt=%d image_count=%d", settings.ai_model, attempt, sum(item.get("type") == "image_url" for msg in messages if isinstance(msg.get("content"), list) for item in msg["content"]))
             try:
                 response = httpx.post(settings.ai_base_url + "/chat/completions", json=payload,
                                       headers={"Authorization": f"Bearer {settings.ai_key}"},
@@ -173,7 +175,7 @@ class AIClient:
                         result = json.loads(choice["message"]["content"])
                     except (KeyError, IndexError, TypeError, ValueError):
                         raise ValueError("AI 响应为空、被截断或不是有效 JSON") from None
-                    logger.info("AI 响应完成：elapsed=%.2fs", time.monotonic() - started)
+                    logger.debug("AI 响应完成：elapsed=%.2fs", time.monotonic() - started)
                     return result, {"role": "assistant", "content": choice["message"]["content"]}
                 failure = f"AI 请求失败：HTTP {response.status_code}"
                 if response.status_code not in (429, 500, 502, 503, 504):

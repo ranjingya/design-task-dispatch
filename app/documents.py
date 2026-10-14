@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def read_document(data: bytes, suffix: str, source: str, material) -> None:
     """功能说明：解析需求文档并汇入本次材料。参数 data：文件内容；suffix：文件类型；source：来源名称；material：共享限额与收集器。返回值：无。"""
-    logger.info("读取需求文档：type=%s bytes=%d", suffix, len(data))
+    logger.debug("读取需求文档：type=%s bytes=%d", suffix, len(data))
     if suffix == ".pdf":
         read_pdf(data, source, material)
     elif suffix == ".xls":

@@ -480,3 +480,24 @@ def test_submitter_initialization_survives_model_failure(feishu, monkeypatch):
         process_record('recTest', MAPPING, feishu)
     assert feishu.update_record.call_args_list[0].args[1] == {'需求人': [{'id': 'creator'}]}
     assert '需求人' not in feishu.update_record.call_args.args[1]
+
+
+def test_normal_task_has_four_summary_lines(feishu, monkeypatch, caplog):
+    """正常评级只输出四行摘要，记录标识仅出现在开始行。"""
+    import logging
+    from app.dispatch import Dispatcher
+    monkeypatch.setattr(AIClient, "classify", Mock(return_value=RATED))
+    dispatcher = Dispatcher(feishu.settings)
+    dispatcher.feishu = feishu
+    try:
+        with caplog.at_level(logging.INFO):
+            dispatcher._run("recSummary", MAPPING)
+    finally:
+        dispatcher.close()
+    messages = [record.getMessage() for record in caplog.records if record.getMessage()]
+    assert len(messages) == 4
+    assert "任务开始 record=recSummary" in messages[0]
+    assert "需求就绪 部门=测试部" in messages[1]
+    assert "类型=测试类型 等级=A 分数=2" in messages[2]
+    assert "任务完成 结果=回写成功" in messages[3]
+    assert all("recSummary" not in line for line in messages[1:])

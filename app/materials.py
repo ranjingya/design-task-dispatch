@@ -107,7 +107,7 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
 
     started = time.monotonic()
     path = feishu.settings.materials_path
-    logger.info("加载材料配置：%s", path)
+    logger.debug("加载材料配置：%s", path)
     config = json.loads(path.read_text(encoding="utf-8"))
     for key in ("max_files", "max_file_bytes", "max_total_file_bytes", "max_unpacked_bytes", "max_cells", "max_sheets",
                 "max_pdf_pages", "max_text_chars", "image_long_edge", "export_attempts", "export_interval_seconds"):
@@ -134,7 +134,7 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
             suffix = Path(name).suffix.lower() or mime_suffix.get(mime, "")
             if suffix in (".zip", ".rar", ".7z") or mime in ("application/zip", "application/x-zip-compressed"):
                 bundle.add_text(source, "素材压缩包不参与识别，未读取内容")
-                logger.info("跳过素材压缩包：record_id=%s index=%d", record_id, index)
+                logger.debug("跳过素材压缩包：record_id=%s index=%d", record_id, index)
                 continue
             processed += 1
             if processed > config["max_files"]:
@@ -155,11 +155,11 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
                                  requires_detail=any(word in name for word in keywords))
             else:
                 read_document(data, suffix, source, bundle)
-            logger.info("附件读取完成：record_id=%s index=%d", record_id, index)
+            logger.debug("附件读取完成：record_id=%s index=%d", record_id, index)
         except (ValueError, RuntimeError) as exc:
             bundle.issue(source, str(exc))
         except Exception as exc:
-            logger.warning("附件解析异常：record_id=%s index=%d error_type=%s", record_id, index, type(exc).__name__)
+            logger.warning("附件解析异常 index=%d error_type=%s", index, type(exc).__name__)
             bundle.issue(source, "文件损坏、加密或包含无法解析的内容")
     if document_link:
         source = "需求文档链接"
@@ -176,5 +176,5 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
         except Exception as exc:
             logger.warning("在线电子表格解析异常：error_type=%s", type(exc).__name__)
             bundle.issue(source, "在线表格无法完整解析")
-    logger.info("材料整理完成：record_id=%s text_chars=%d images=%d issues=%d elapsed=%.2fs", record_id, bundle.text_size, len(bundle.images), len(bundle.issues), time.monotonic() - started)
+    logger.debug("材料整理完成：record_id=%s text_chars=%d images=%d issues=%d elapsed=%.2fs", record_id, bundle.text_size, len(bundle.images), len(bundle.issues), time.monotonic() - started)
     return bundle

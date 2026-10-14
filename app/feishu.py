@@ -42,7 +42,7 @@ class FeishuClient:
                 code = data.get("code") if isinstance(data, dict) else None
                 if response.is_success and code == 0:
                     if attempt > 1:
-                        logger.info("飞书请求重试成功：method=%s attempt=%d", method, attempt)
+                        logger.debug("飞书请求重试成功：method=%s attempt=%d", method, attempt)
                     return data
                 if response.is_success and data is None:
                     raise RuntimeError("飞书返回了非 JSON 响应")
@@ -50,10 +50,9 @@ class FeishuClient:
                 # 多维表数据未就绪使用 HTTP 400，但允许稍后重试。
                 retryable = response.status_code in {429, 500, 502, 503, 504} or code == 1254607
             if not retryable or attempt == attempts:
-                logger.error("飞书请求终止：method=%s attempt=%d error=%s", method, attempt, error)
-                raise RuntimeError(error) from None
+                raise RuntimeError(f"{error} 尝试={attempt}/{attempts}") from None
             delay = 2 ** (attempt - 1)
-            logger.warning("飞书请求暂时失败，准备重试：method=%s attempt=%d/%d delay=%ds error=%s",
+            logger.warning("飞书请求重试 method=%s 次数=%d/%d 等待=%ds 原因=%s",
                            method, attempt, attempts, delay, error)
             time.sleep(delay)
 
@@ -61,7 +60,7 @@ class FeishuClient:
         """缓存应用访问凭证，提前一分钟刷新。"""
         with self._lock:
             if time.monotonic() >= self._expires_at:
-                logger.info("刷新飞书应用访问凭证")
+                logger.debug("刷新飞书应用访问凭证")
                 data = self._request("POST", "/auth/v3/tenant_access_token/internal", json={
                     "app_id": self.settings.app_id,
                     "app_secret": self.settings.app_secret,
@@ -76,9 +75,9 @@ class FeishuClient:
         self._contact_cache = {k: v for k, v in self._contact_cache.items() if v[0] > now}
         cache_key = (resource, identity)
         if cache_key in self._contact_cache:
-            logger.info("使用通讯录缓存：resource=%s", resource)
+            logger.debug("使用通讯录缓存：resource=%s", resource)
             return self._contact_cache[cache_key][1]
-        logger.info("加载通讯录资源：resource=%s", resource)
+        logger.debug("加载通讯录资源：resource=%s", resource)
         data = self._request("GET", f"/contact/v3/{resource}/{quote(identity, safe='')}",
                              params={"user_id_type": "open_id", "department_id_type": "open_department_id"},
                              headers={"Authorization": f"Bearer {self._access_token()}"})["data"][key]
@@ -103,14 +102,14 @@ class FeishuClient:
 
     def get_record(self, record_id: str) -> dict:
         """功能说明：获取需求记录。参数 record_id：飞书记录 ID。返回值：记录字段字典。"""
-        logger.info("读取飞书记录：record_id=%s", record_id)
+        logger.debug("读取飞书记录：record_id=%s", record_id)
         data = self._request("GET", self._record_path(record_id),
                              headers={"Authorization": f"Bearer {self._access_token()}"})
         return data["data"]["record"]["fields"]
 
     def update_record(self, record_id: str, fields: dict) -> None:
         """功能说明：回写记录。参数 record_id：记录 ID；fields：飞书字段名与字段值。返回值：无。"""
-        logger.info("回写飞书记录：record_id=%s field_count=%d", record_id, len(fields))
+        logger.debug("回写飞书记录：record_id=%s field_count=%d", record_id, len(fields))
         self._request("PUT", self._record_path(record_id), json={"fields": fields},
                       headers={"Authorization": f"Bearer {self._access_token()}"})
 
@@ -134,7 +133,7 @@ class FeishuClient:
     def get_records(self, table_id: str, base_token: str | None = None) -> list[dict]:
         """功能说明：读取完整业务记录。参数 table_id：来源表；base_token：可选跨 Base 来源。返回值：含记录 ID 和字段的列表。"""
         records = self._list_all(table_id, "records", base_token)
-        logger.info("业务记录加载完成：table_id=%s count=%d", table_id, len(records))
+        logger.debug("业务记录加载完成：table_id=%s count=%d", table_id, len(records))
         return records
 
     def get_fields(self) -> list[dict]:
@@ -148,7 +147,7 @@ class FeishuClient:
                  for item in rules if item.get("fields")]
         if not rules:
             raise ValueError("规则表为空，无法评级")
-        logger.info("规则加载完成：count=%d", len(rules))
+        logger.debug("规则加载完成：count=%d", len(rules))
         return rules
 
     def download_attachment(self, file_token: str, record_id: str, field_id: str, limit: int) -> bytes:
@@ -182,7 +181,7 @@ class FeishuClient:
 
     def export_sheet(self, token: str, limit: int, attempts: int, interval: int) -> bytes:
         """功能说明：导出在线电子表格为 Excel。参数 token：电子表格令牌；limit：文件字节上限；attempts：最多查询次数；interval：查询间隔秒数。返回值：Excel 文件字节。"""
-        logger.info("开始导出飞书电子表格")
+        logger.debug("开始导出飞书电子表格")
         headers = {"Authorization": f"Bearer {self._access_token()}"}
         ticket = self._request("POST", "/drive/v1/export_tasks", headers=headers,
                                json={"token": token, "type": "sheet", "file_extension": "xlsx"})["data"]["ticket"]
@@ -195,7 +194,7 @@ class FeishuClient:
                     raise ValueError("在线电子表格导出文件超过大小上限")
                 path = "/drive/v1/export_tasks/file/" + quote(result["file_token"], safe="") + "/download"
                 data = self._download(API + path, limit)
-                logger.info("电子表格导出完成：bytes=%d", len(data))
+                logger.debug("电子表格导出完成：bytes=%d", len(data))
                 return data
             if status not in (1, 2):
                 raise RuntimeError(f"电子表格导出失败：状态 {status}，请检查应用的文档访问与导出权限")

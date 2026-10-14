@@ -28,7 +28,7 @@ def resolve_department(creator, rules: list[dict], feishu) -> str | None:
                 visited.add(department_id)
                 department = feishu.get_contact_department(department_id)
                 name = department.get("name")
-                logger.info("查询创建人部门层级：department=%s", name)
+                logger.debug("查询创建人部门层级：department=%s", name)
                 if name in allowed:
                     matches.add(name)
                     break
@@ -47,5 +47,5 @@ def resolve_department(creator, rules: list[dict], feishu) -> str | None:
         logger.warning("创建人员部门未知：匹配到多个业务部门")
         return None
     result = matches.pop()
-    logger.info("创建人部门识别完成：department=%s", result)
+    logger.debug("创建人部门识别完成：department=%s", result)
     return result

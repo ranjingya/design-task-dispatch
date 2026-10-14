@@ -15,6 +15,8 @@ from app.rules import select_department, review, format_result, load_score
 from app.rule_cache import load_daily_rules
 from app.recommendation import protected, recommend, save_rotation, format_recommendation
 
+from app.task_logging import task_context, task_details
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,21 +24,22 @@ def initialize_submitter(record_id: str, fields: dict, mapping: dict[str, str], 
     """功能说明：需求人为空时复制创建人。参数 record_id：记录ID；fields：当前记录及初始化后快照；mapping：字段映射；feishu：飞书客户端。返回值：无。"""
     target = mapping["submitter"]
     if fields.get(target):
-        logger.info("保留已填写的需求人：record_id=%s", record_id)
+        logger.debug("保留已填写的需求人：record_id=%s", record_id)
         return
     creator = fields.get(mapping["creator"])
     people = creator if isinstance(creator, list) else [creator]
     if len(people) != 1 or not isinstance(people[0], dict) or not people[0].get("id"):
-        logger.warning("需求人初始化跳过：创建人缺失，record_id=%s", record_id)
+        logger.warning("需求人初始化跳过：创建人缺失")
         return
     value = [{"id": people[0]["id"]}]
     feishu.update_record(record_id, {target: value})
     fields[target] = value
-    logger.info("已从创建人初始化需求人：record_id=%s", record_id)
+    logger.debug("已从创建人初始化需求人：record_id=%s", record_id)
 
 
 def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient) -> None:
     """功能说明：读取需求、调用 AI 评级、按规则推荐人员并回写结果。参数 record_id：记录 ID；mapping：本次字段快照；feishu：飞书客户端。返回值：无。"""
+    task_details(stage="校验字段")
     schema = {item["field_name"]: item for item in feishu.get_fields()}
     result_name = mapping.get("rule_explanation")
     type_name, level_name = mapping.get("work_type"), mapping.get("level")
@@ -60,10 +63,12 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
                          schema.get(mapping['recommended_assignee'], {}).get('type') != 11):
         raise ValueError("推荐结果需为文本，系统推荐人需为人员字段")
     try:
+        task_details(stage="读取记录")
         fields = feishu.get_record(record_id)
         if recommending and protected(fields, mapping):
-            logger.info("保留人工安排或已结束任务：record_id=%s", record_id)
+            task_details(outcome="跳过：已有人工安排或任务已结束")
             return
+        task_details(stage="准备需求")
         initialize_submitter(record_id, fields, mapping, feishu)
         feishu.settings.validate_ai()
         demand = {key: fields.get(mapping[key]) for key in
@@ -77,7 +82,9 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
         if not options or not {"A", "B", "C"} <= levels:
             raise ValueError("工作类型或分类等级选项配置不完整")
         missing = [mapping[key] for key in ("title", "description") if not demand.get(key)]
-        logger.info("需求读取完成：record_id=%s field_count=%d", record_id, len(demand))
+        ai_elapsed = 0.0
+        text_size = image_count = 0
+        task_details(stage="读取材料")
         if department is None:
             result = review("创建人员部门未知", [], None)
         elif missing:
@@ -96,7 +103,14 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
             demand["image_sources"] = material.image_sources
             # 未读取的材料显式传入，让模型列出候选；程序禁止此时给出确定评级。
             demand["material_issues"] = material.issues
+            text_size, image_count = material.text_size, len(material.images)
+            logger.info("需求就绪 部门=%s 规则=%d 图片=%d 文档文字=%d", department, len(eligible), image_count, text_size)
+            task_details(stage="AI评级")
+            ai_started = time.monotonic()
             result = AIClient(feishu.settings).classify(demand, eligible, options, material.images, department, material=material)
+            ai_elapsed = time.monotonic() - ai_started
+        if department is None or missing:
+            logger.info("需求就绪 部门=%s 规则=%d 图片=0 文档文字=0", department or "未知", len(eligible))
         score = None
         rule = None
         explanation = "创建人员部门未知" if department is None else format_result(result, rules)
@@ -105,34 +119,40 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
             score = load_score(rule.get("load_score"))
             if score is None:
                 explanation += "\n\n负载分：规则分数缺失或无效，待补充后重新处理。"
-                logger.warning("命中规则缺少有效负载分：record_id=%s rule_id=%s", record_id, rule["record_id"])
+                logger.warning("命中规则缺少有效负载分 rule=%s", rule["record_id"])
         updates = {result_name: explanation, type_name: result["work_type"],
                    level_name: result["level"], score_name: score, mapping["department"]: department}
         pending = None
+        task_details(stage="人员推荐")
         if recommending:
             try:
                 recommendation, pending = recommend(record_id, fields, demand, rule, mapping, feishu)
                 updates.update(recommendation)
             except Exception:
-                logger.exception("人员推荐失败：record_id=%s", record_id)
+                task_details(recommended="人工分配")
+                logger.exception("人员推荐失败，转人工分配")
                 updates.update({mapping['recommendation_result']: format_recommendation('人工分配', '资源读取或配置校验失败，请重试', '人员负载暂不可用', score),
                                 mapping['recommended_assignee']: []})
             # 模型运行期间可能有人确认，回写前再次检查人工安排。
             if protected(feishu.get_record(record_id), mapping):
-                logger.info("回写前发现人工安排，保留当前结果：record_id=%s", record_id)
+                task_details(outcome="跳过：回写前发现人工安排")
                 return
+        details = task_context.get() or {}
+        logger.info("识别推荐 类型=%s 等级=%s 分数=%s 推荐=%s AI耗时=%.2fs",
+                    result["work_type"] or "待确认", result["level"] or "待确认",
+                    f"{score:g}" if score is not None else "待确认", details.get("recommended", "未推荐"), ai_elapsed)
+        task_details(stage="回写结果")
         feishu.update_record(record_id, updates)
+        task_details(outcome="回写成功")
         try:
             save_rotation(pending)
         except Exception:
-            logger.exception("轮换位置保存失败，推荐已回写：record_id=%s", record_id)
-        logger.info("评级回写完成：record_id=%s matched=%s load_score=%s", record_id, result["matched"], score)
+            logger.exception("轮换位置保存失败，推荐已回写")
     except Exception:
-        logger.exception("评级流程失败：record_id=%s", record_id)
         try:
             feishu.update_record(record_id, {result_name: "处理失败：读取材料、调用模型或校验结果失败，请查看服务日志并重新触发。"})
-        except Exception:
-            logger.exception("失败提示回写失败：record_id=%s", record_id)
+        except Exception as exc:
+            logger.warning("失败提示回写失败 error=%s", exc)
         raise
 
 
@@ -154,7 +174,7 @@ class Dispatcher:
             now = time.monotonic()
             self._recent = {key: expiry for key, expiry in self._recent.items() if expiry > now}
             if record_id in self._active or record_id in self._recent:
-                logger.info("跳过重复请求：record_id=%s", record_id)
+                logger.debug("跳过重复请求：record_id=%s", record_id)
                 return False
             if len(self._active) >= 100:
                 raise RuntimeError("后台任务已满，请稍后重试")
@@ -164,25 +184,29 @@ class Dispatcher:
             except RuntimeError:
                 self._active.remove(record_id)
                 raise
-        logger.info("任务已接收：record_id=%s", record_id)
+        logger.debug("任务已接收：record_id=%s", record_id)
         return True
 
     def _run(self, record_id: str, mapping: dict[str, str]) -> None:
         """执行任务；失败允许再次投递，成功保留五分钟去重记录。"""
         success = False
         started = time.monotonic()
-        logger.info("开始处理：record_id=%s", record_id)
+        token = task_context.set({"stage": "开始处理", "outcome": "处理成功"})
+        logger.info("────────── 任务开始 record=%s ──────────", record_id)
         try:
             self.runner(record_id, mapping, self.feishu)
             success = True
         except Exception:
-            logger.exception("后台处理失败：record_id=%s，可重新发送请求", record_id)
+            logger.exception("任务失败 阶段=%s 总耗时=%.2fs", task_context.get()["stage"], time.monotonic() - started)
         finally:
             with self._lock:
                 self._active.discard(record_id)
                 if success:
                     self._recent[record_id] = time.monotonic() + 300
-            logger.info("处理结束：record_id=%s success=%s elapsed=%.2fs", record_id, success, time.monotonic() - started)
+            if success:
+                logger.info("任务完成 结果=%s 总耗时=%.2fs", task_context.get()["outcome"], time.monotonic() - started)
+            logger.info("", extra={"task_separator": True})
+            task_context.reset(token)
 
     def close(self) -> None:
         """停止接收后台任务并等待已接收任务结束。"""
