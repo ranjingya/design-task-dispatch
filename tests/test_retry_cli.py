@@ -70,3 +70,12 @@ def test_invalid_cli_record_never_sends(monkeypatch):
     with pytest.raises(SystemExit):
         main(['retry', 'invalid'])
     post.assert_not_called()
+
+
+@pytest.mark.parametrize('status', [200, 400])
+def test_bitable_not_ready_is_retryable(monkeypatch, status):
+    request = Mock(side_effect=[response(status, {'code': 1254607}), response()])
+    monkeypatch.setattr('app.feishu.httpx.request', request)
+    monkeypatch.setattr('app.feishu.time.sleep', Mock())
+    assert FeishuClient._request('GET', '/example')['code'] == 0
+    assert request.call_count == 2

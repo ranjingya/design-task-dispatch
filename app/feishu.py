@@ -35,19 +35,20 @@ class FeishuClient:
                 error = f"飞书网络请求失败：{type(exc).__name__}"
                 retryable = isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError))
             else:
-                if response.is_success:
-                    try:
-                        data = response.json()
-                    except ValueError:
-                        raise RuntimeError("飞书返回了非 JSON 响应") from None
-                    if not isinstance(data, dict) or data.get("code") != 0:
-                        code = data.get("code") if isinstance(data, dict) else "unknown"
-                        raise RuntimeError(f"飞书业务请求失败：code={code}")
+                try:
+                    data = response.json()
+                except ValueError:
+                    data = None
+                code = data.get("code") if isinstance(data, dict) else None
+                if response.is_success and code == 0:
                     if attempt > 1:
                         logger.info("飞书请求重试成功：method=%s attempt=%d", method, attempt)
                     return data
-                error = f"飞书 HTTP 请求失败：{response.status_code}"
-                retryable = response.status_code in {429, 500, 502, 503, 504}
+                if response.is_success and data is None:
+                    raise RuntimeError("飞书返回了非 JSON 响应")
+                error = f"飞书请求失败：HTTP={response.status_code} code={code}"
+                # 多维表数据未就绪使用 HTTP 400，但允许稍后重试。
+                retryable = response.status_code in {429, 500, 502, 503, 504} or code == 1254607
             if not retryable or attempt == attempts:
                 logger.error("飞书请求终止：method=%s attempt=%d error=%s", method, attempt, error)
                 raise RuntimeError(error) from None
