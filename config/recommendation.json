@@ -38,7 +38,10 @@
       "primary": "饭团",
       "backup": [
         "塔可"
-      ]
+      ],
+      "id": "shop-001",
+      "name": "京东POP",
+      "platform": "京东"
     },
     {
       "department": "市场部",
@@ -49,7 +52,10 @@
       "backup": [
         "蛋糕",
         "青提"
-      ]
+      ],
+      "id": "shop-002",
+      "name": "京东自营",
+      "platform": "京东"
     },
     {
       "department": "市场部",
@@ -59,7 +65,10 @@
       "primary": "塔可",
       "backup": [
         "饭团"
-      ]
+      ],
+      "id": "shop-003",
+      "name": "拼多多官方旗舰店",
+      "platform": "拼多多"
     },
     {
       "department": "市场部",
@@ -70,17 +79,25 @@
       "primary": "青提",
       "backup": [
         "蛋糕"
-      ]
+      ],
+      "id": "shop-004",
+      "name": "拼多多旗舰店",
+      "platform": "拼多多"
     },
     {
       "department": "市场部",
       "aliases": [
-        "拼多多儿童服饰旗舰店"
+        "拼多多儿童服饰旗舰店",
+        "拼多多服饰店",
+        "pdd服饰店"
       ],
       "primary": "蛋糕",
       "backup": [
         "塔可"
-      ]
+      ],
+      "id": "shop-005",
+      "name": "拼多多儿童服饰旗舰店",
+      "platform": "拼多多"
     },
     {
       "department": "市场部",
@@ -91,7 +108,10 @@
       "primary": "软糖",
       "backup": [
         "青提"
-      ]
+      ],
+      "id": "shop-006",
+      "name": "拼多多母婴玩具店",
+      "platform": "拼多多"
     },
     {
       "department": "市场部",
@@ -101,7 +121,10 @@
       "primary": "青提",
       "backup": [
         "蛋糕"
-      ]
+      ],
+      "id": "shop-007",
+      "name": "欢趣专卖店",
+      "platform": ""
     },
     {
       "department": "市场部",
@@ -111,7 +134,10 @@
       "primary": "软糖",
       "backup": [
         "饭团"
-      ]
+      ],
+      "id": "shop-008",
+      "name": "运动户外旗舰店",
+      "platform": ""
     },
     {
       "department": "渠道部",
@@ -121,7 +147,10 @@
       "primary": "饭团",
       "backup": [
         "塔可"
-      ]
+      ],
+      "id": "shop-009",
+      "name": "阿里巴巴湖州趣行",
+      "platform": "阿里巴巴"
     },
     {
       "department": "渠道部",
@@ -131,7 +160,10 @@
       "primary": "饭团",
       "backup": [
         "蛋糕"
-      ]
+      ],
+      "id": "shop-010",
+      "name": "阿里巴巴杭州萌途",
+      "platform": "阿里巴巴"
     }
   ],
   "members": {
@@ -165,5 +197,15 @@
         "action": "owner"
       }
     ]
-  }
+  },
+  "shop_platforms": {
+    "拼多多": [
+      "PDD"
+    ],
+    "京东": [
+      "JD"
+    ],
+    "阿里巴巴": []
+  },
+  "shop_ai_fallback": true
 }

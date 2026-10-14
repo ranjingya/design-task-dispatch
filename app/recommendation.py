@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from app.rules import load_score, plain
+from app.shop_matching import resolve_shop
 from app.task_logging import task_details
 
 logger = logging.getLogger(__name__)
@@ -84,10 +85,7 @@ def product_owner(demand, records, config):
 
 def shop_owner(demand, shops):
     """功能说明：按部门及店铺名称定位负责团队。参数 demand：需求文本；shops：店铺配置。返回值：唯一店铺配置或空值。"""
-    text = re.sub(r'\s+', '', ' '.join(plain(demand.get(k)) for k in ('platform', 'title', 'description', 'notes'))).casefold()
-    matches = [s for s in shops if s['department'] == plain(demand.get('department')) and
-               any(re.sub(r'\s+', '', a).casefold() in text for a in s['aliases'])]
-    return matches[0] if len(matches) == 1 else None
+    return resolve_shop(demand, {'shops': shops})[0]
 
 
 def platform_policy(platform, policies):
@@ -172,13 +170,15 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
     elif method == '找对应人员':
         route = routes.get(rule['record_id'])
         if route == 'shop':
-            shop = shop_owner(demand, config['shops'])
+            shop, basis, shop_candidates = resolve_shop(demand, config, settings)
             if not shop:
-                return answer('未能唯一确定店铺，请补充具体店铺名称')
+                choices = '、'.join(s.get('name', s['aliases'][0]) for s in shop_candidates)
+                logger.warning('店铺识别待确认：%s', basis)
+                return answer(basis + (f'；候选店铺：{choices}' if choices else ''))
             owner, backups = shop['primary'], shop['backup']
             if any(n not in names for n in [owner] + backups):
                 return answer('店铺团队存在未配置成员，需人工确认')
-            return answer(f"{shop['aliases'][0]}，主负责人优先，备选供组长调整", names[owner], mode='对应人员',
+            return answer(f"{shop.get('name', shop['aliases'][0])}，{basis}；主负责人优先，备选供组长调整", names[owner], mode='对应人员',
                           people=describe([owner]) + (' ｜ 备选：' + describe(backups) if backups else ''))
         policy = None
         if route == 'product_platform':
