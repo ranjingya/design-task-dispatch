@@ -24,21 +24,37 @@ class FeishuClient:
 
     @staticmethod
     def _request(method: str, path: str, **kwargs) -> dict:
-        """发送请求，只记录状态码和错误码，避免输出凭证及业务正文。"""
-        try:
-            response = httpx.request(method, API + path, timeout=30, **kwargs)
-        except httpx.RequestError:
-            raise RuntimeError("飞书网络请求失败") from None
-        if not response.is_success:
-            raise RuntimeError(f"飞书 HTTP 请求失败：{response.status_code}")
-        try:
-            data = response.json()
-        except ValueError:
-            raise RuntimeError("飞书返回了非 JSON 响应") from None
-        if not isinstance(data, dict) or data.get("code") != 0:
-            code = data.get("code") if isinstance(data, dict) else "unknown"
-            raise RuntimeError(f"飞书业务请求失败：code={code}")
-        return data
+        """功能说明：调用飞书接口并重试瞬时故障。参数 method：HTTP方法；path：接口路径；kwargs：请求参数。返回值：成功的JSON响应。"""
+        # 查询、幂等字段回写和取凭证可重试；创建类请求不自动重放。
+        attempts = 3 if method.upper() in {"GET", "PUT"} or path == "/auth/v3/tenant_access_token/internal" else 1
+        for attempt in range(1, attempts + 1):
+            retryable = False
+            try:
+                response = httpx.request(method, API + path, timeout=30, **kwargs)
+            except httpx.RequestError as exc:
+                error = f"飞书网络请求失败：{type(exc).__name__}"
+                retryable = isinstance(exc, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError))
+            else:
+                if response.is_success:
+                    try:
+                        data = response.json()
+                    except ValueError:
+                        raise RuntimeError("飞书返回了非 JSON 响应") from None
+                    if not isinstance(data, dict) or data.get("code") != 0:
+                        code = data.get("code") if isinstance(data, dict) else "unknown"
+                        raise RuntimeError(f"飞书业务请求失败：code={code}")
+                    if attempt > 1:
+                        logger.info("飞书请求重试成功：method=%s attempt=%d", method, attempt)
+                    return data
+                error = f"飞书 HTTP 请求失败：{response.status_code}"
+                retryable = response.status_code in {429, 500, 502, 503, 504}
+            if not retryable or attempt == attempts:
+                logger.error("飞书请求终止：method=%s attempt=%d error=%s", method, attempt, error)
+                raise RuntimeError(error) from None
+            delay = 2 ** (attempt - 1)
+            logger.warning("飞书请求暂时失败，准备重试：method=%s attempt=%d/%d delay=%ds error=%s",
+                           method, attempt, attempts, delay, error)
+            time.sleep(delay)
 
     def _access_token(self) -> str:
         """缓存应用访问凭证，提前一分钟刷新。"""
