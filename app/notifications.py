@@ -28,8 +28,6 @@ def load_notifications(path):
         raise ValueError("new_task.enabled 必须是布尔值")
     if not config.get("enabled", False):
         return {}
-    if not isinstance(config.get("source_name", ""), str):
-        raise ValueError("new_task.source_name 必须为文本")
     people = config.get("recipients", [])
     if not isinstance(people, list):
         raise ValueError("new_task.recipients 必须为人员列表")
@@ -54,8 +52,8 @@ def escape_text(value):
     return re.sub(r"([\\`*_{}\[\]()#+.!~|>-])", r"\\\1", text)
 
 
-def notification_content(record_id, fields, mapping, settings, feishu, source_name):
-    """功能说明：按上新样式生成紫色卡片。参数 record_id：记录 ID；fields：回写后字段；mapping：字段映射；settings：数据配置；feishu：人员身份查询客户端；source_name：来源表显示名称。返回值：飞书 Card 2.0 内容。"""
+def notification_content(record_id, fields, mapping, settings, feishu):
+    """功能说明：按上新样式生成紫色卡片。参数 record_id：记录 ID；fields：回写后字段；mapping：字段映射；settings：数据配置；feishu：人员身份查询客户端。返回值：飞书 Card 2.0 内容。"""
     def value(key):
         return fields.get(mapping.get(key))
 
@@ -106,8 +104,6 @@ def notification_content(record_id, fields, mapping, settings, feishu, source_na
         {"tag": "markdown", "content": "\n".join(f"**{label}：** {text}" for label, text in lines)},
         {"tag": "button", "text": {"tag": "plain_text", "content": "查看需求"}, "type": "default",
          "behaviors": [{"type": "open_url", "default_url": source_url + f"&record={record}"}]},
-        {"tag": "hr"},
-        {"tag": "markdown", "content": f"来自 [{escape_text(source_name)}]({source_url})"},
     ]
     return {"schema": "2.0", "config": {"width_mode": "default"},
             "header": {"title": {"tag": "plain_text", "content": "美工任务上新"}, "template": "purple"},
@@ -147,7 +143,7 @@ def send_new_task(record_id, mapping, feishu):
                 if not state:
                     if content is None:
                         fields = feishu.get_record(record_id)
-                        content = notification_content(record_id, fields, mapping, settings, feishu, config.get("source_name", "需求任务表"))
+                        content = notification_content(record_id, fields, mapping, settings, feishu)
                     state = {"sent": False, "started_at": time.time(), "content": content}
                     save_state(path, state)
                 message_id = bot.send_card(person["open_id"], state["content"], key[:50])

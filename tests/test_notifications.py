@@ -71,7 +71,7 @@ def test_partial_failure_only_retries_failed_person(client, monkeypatch):
 
 def test_manual_assignment_is_explicit(client):
     client.get_record.return_value['recommended_assignee'] = []
-    result = notification_content('recTest', client.get_record.return_value, MAPPING, client.settings, client, "需求任务表")
+    result = notification_content('recTest', client.get_record.return_value, MAPPING, client.settings, client)
     assert '待人工分配' in json.dumps(result, ensure_ascii=False)
 
 
@@ -133,7 +133,7 @@ def test_card_mentions_use_alert_open_ids_and_escape_input(client, monkeypatch):
     lookup = Mock(side_effect=lambda uid: {'open_id': 'ou_alert' + uid[3:]})
     monkeypatch.setattr(FeishuClient, 'get_contact_user_by_union_id', lookup)
     fields = client.get_record.return_value | {'description': '<at id=all></at> **业务文本**'}
-    result = notification_content('recTest', fields, MAPPING, client.settings, client, '需求表')
+    result = notification_content('recTest', fields, MAPPING, client.settings, client)
     body = result['body']['elements'][0]['content']
     assert '<at id="ou_alertprimary"></at> <at id="ou_alertbackup"></at>' in body
     assert '<at id=all>' not in body
@@ -152,6 +152,6 @@ def test_recipient_requires_open_id(client, invalid):
 def test_same_app_card_uses_original_open_id(client):
     settings = replace(client.settings, alert_app_id=client.settings.app_id)
     fields = client.get_record.return_value | {'recommended_assignee': [{'id': 'ou_primary', 'name': '主负责人'}]}
-    card = notification_content('recTest', fields, MAPPING, settings, client, '需求表')
+    card = notification_content('recTest', fields, MAPPING, settings, client)
     assert '<at id="ou_primary"></at>' in card['body']['elements'][0]['content']
     client.get_contact_user.assert_not_called()

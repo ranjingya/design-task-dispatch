@@ -1,7 +1,6 @@
 # 每条任务发送前读取；open_id 必须属于 FEISHU_ALERT_APP_ID 对应的通知应用。
 [new_task]
 enabled = true
-source_name = "美工组任务分配与月度看板 | 测试版"
 
 [[new_task.recipients]]
 name = "软糖"
