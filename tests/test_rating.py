@@ -14,14 +14,14 @@ from app.feishu import FeishuClient
 from app.materials import collect_materials
 from app.rules import normalize_rules, select_department, format_result
 
-MAPPING = {"title": "标题", "description": "说明", "attachments": "材料", "platform": "平台",
+MAPPING = {"creator": "创建人", "title": "标题", "description": "说明", "attachments": "材料", "platform": "平台",
            "department": "部门", "load_score": "分数", "work_type": "类别", "level": "等级", "rule_explanation": "结果"}
 RULES = [{"record_id": "recRule", "work_type": "测试类型", "content": "测试工作", "departments": ["测试部"],
           "default_level": "A", "adjustment": "", "assignment": "轮流", "load_score": 2}]
 RAW_RULES = [{"record_id": "recRule", "fields": {"工作类型": "测试类型", "包含的工作": "测试工作",
               "适用部门": "测试部", "默认ABC分类": "A基础重复", "分类调整说明": "", "推荐方式": "轮流", "人员负载分数": 2}}]
 OPTIONS = ["测试类型"]
-SCHEMA = [{"field_name": "部门", "type": 3}, {"field_name": "平台", "type": 1},
+SCHEMA = [{"field_name": "创建人", "type": 1003}, {"field_name": "部门", "type": 3}, {"field_name": "平台", "type": 1},
           {"field_name": "分数", "type": 2}, {"field_name": "类别", "type": 3, "property": {"options": [{"name": x} for x in OPTIONS]}},
           {"field_name": "等级", "type": 3, "property": {"options": [{"name": x} for x in "ABC"]}},
           {"field_name": "结果", "type": 1}, {"field_name": "材料", "type": 17, "field_id": "fldImage"}]
@@ -43,9 +43,11 @@ def settings(tmp_path):
 def feishu(settings):
     client = Mock(spec=FeishuClient)
     client.settings = settings
+    client.get_contact_user.return_value = {"department_ids": ["od-team"]}
+    client.get_contact_department.return_value = {"name": "测试部", "parent_department_id": "0"}
     client.get_fields.return_value = SCHEMA
     client.get_rules.return_value = RAW_RULES
-    client.get_record.return_value = {"标题": "测试", "说明": "测试需求", "平台": "示例平台", "部门": "测试部"}
+    client.get_record.return_value = {"创建人": {"id": "creator"}, "标题": "测试", "说明": "测试需求", "平台": "示例平台", "部门": "测试部"}
     return client
 
 
@@ -55,7 +57,7 @@ def test_success_writes_rating_and_score(feishu, monkeypatch):
     feishu.get_record.return_value.update({"类别": "旧类别", "结果": "旧原因", "最终负责人": "某人"})
     process_record("recTest", MAPPING, feishu)
     fields = feishu.update_record.call_args.args[1]
-    assert set(fields) == {"类别", "等级", "结果", "分数"}
+    assert set(fields) == {"类别", "等级", "结果", "分数", "部门"}
     assert fields["类别"] == "测试类型"
     assert fields["结果"] == "已匹配｜测试类型\n\n对应：测试工作"
     assert classify.call_args.args[0]["platform"] == "示例平台"
@@ -66,7 +68,7 @@ def test_success_writes_rating_and_score(feishu, monkeypatch):
 def test_missing_input_writes_review_without_ai(feishu, monkeypatch):
     classify = Mock()
     monkeypatch.setattr(AIClient, "classify", classify)
-    feishu.get_record.return_value = {"标题": "测试"}
+    feishu.get_record.return_value = {"标题": "测试", "创建人": {"id": "creator"}}
     process_record("recTest", MAPPING, feishu)
     classify.assert_not_called()
     assert feishu.update_record.call_args.args[1]["类别"] is None
@@ -421,3 +423,32 @@ def test_pipeline_includes_document_materials(feishu, monkeypatch):
     assert not demand["material_issues"]
     assert len(classify.call_args.args[3]) == 1
     assert feishu.update_record.call_args.args[1]["分数"] == 2
+
+
+def test_creator_department_overrides_existing_department(feishu, monkeypatch):
+    """创建人决定部门，旧部门和手填需求人不参与归属。"""
+    feishu.get_record.return_value.update({'部门': '其他部', '需求人': [{'id': 'someone_else'}]})
+    classify = Mock(return_value=RATED)
+    monkeypatch.setattr(AIClient, 'classify', classify)
+    process_record('recTest', MAPPING, feishu)
+    feishu.get_contact_user.assert_called_once_with('creator')
+    assert classify.call_args.args[4] == '测试部'
+    assert feishu.update_record.call_args.args[1]['部门'] == '测试部'
+
+
+def test_unknown_creator_clears_old_results_without_ai_or_materials(feishu, monkeypatch):
+    """未知部门时精确提示，清空自动结果且不调用材料和评级。"""
+    feishu.get_contact_user.side_effect = RuntimeError('无权限')
+    mapping = MAPPING | {'recommendation_result': '推荐结果', 'recommended_assignee': '推荐人'}
+    feishu.get_fields.return_value = SCHEMA + [{'field_name': '推荐结果', 'type': 1}, {'field_name': '推荐人', 'type': 11}]
+    feishu.get_record.return_value.update({'类别': '旧值', '等级': 'A', '分数': 5, '推荐人': [{'id': 'old'}]})
+    classify, materials = Mock(), Mock()
+    monkeypatch.setattr(AIClient, 'classify', classify)
+    monkeypatch.setattr('app.dispatch.collect_materials', materials)
+    process_record('recTest', mapping, feishu)
+    classify.assert_not_called()
+    materials.assert_not_called()
+    updates = feishu.update_record.call_args.args[1]
+    assert updates['结果'] == '创建人员部门未知'
+    assert all(updates[key] is None for key in ['部门', '类别', '等级', '分数'])
+    assert updates['推荐人'] == []

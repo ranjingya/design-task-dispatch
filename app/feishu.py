@@ -20,6 +20,7 @@ class FeishuClient:
         self._token = ""
         self._expires_at = 0.0
         self._lock = threading.Lock()
+        self._contact_cache: dict[tuple[str, str], tuple[float, dict]] = {}
 
     @staticmethod
     def _request(method: str, path: str, **kwargs) -> dict:
@@ -51,6 +52,31 @@ class FeishuClient:
                 self._token = data["tenant_access_token"]
                 self._expires_at = time.monotonic() + max(0, data["expire"] - 60)
             return self._token
+
+    def _get_contact(self, resource: str, identity: str, key: str) -> dict:
+        """读取通讯录资源，成功响应在进程内缓存一天，失败不缓存。"""
+        now = time.monotonic()
+        self._contact_cache = {k: v for k, v in self._contact_cache.items() if v[0] > now}
+        cache_key = (resource, identity)
+        if cache_key in self._contact_cache:
+            logger.info("使用通讯录缓存：resource=%s", resource)
+            return self._contact_cache[cache_key][1]
+        logger.info("加载通讯录资源：resource=%s", resource)
+        data = self._request("GET", f"/contact/v3/{resource}/{quote(identity, safe='')}",
+                             params={"user_id_type": "open_id", "department_id_type": "open_department_id"},
+                             headers={"Authorization": f"Bearer {self._access_token()}"})["data"][key]
+        required = ("department_ids",) if resource == "users" else ("name", "parent_department_id")
+        if all(field in data for field in required):
+            self._contact_cache[cache_key] = (now + 86400, data)
+        return data
+
+    def get_contact_user(self, user_id: str) -> dict:
+        """功能说明：查询人员所属部门。参数 user_id：当前应用下的人员 open_id。返回值：人员信息。"""
+        return self._get_contact("users", user_id, "user")
+
+    def get_contact_department(self, department_id: str) -> dict:
+        """功能说明：查询部门及上级节点。参数 department_id：部门 open_department_id。返回值：部门信息。"""
+        return self._get_contact("departments", department_id, "department")
 
     def _record_path(self, record_id: str) -> str:
         parts = [quote(v, safe="") for v in (

@@ -6,6 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
+from app.departments import resolve_department
 from app.ai import AIClient
 from app.materials import collect_materials
 from app.config import Settings, load_fields
@@ -33,6 +34,8 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
         mapping.get("platform"), {}
     ).get("type") != 1:
         raise ValueError("部门需为单选，平台需为文本，请核对字段映射")
+    if schema.get(mapping.get("creator"), {}).get("type") != 1003:
+        raise ValueError("创建人映射需指向创建人字段")
     recommending = "recommendation_result" in mapping
     if recommending and (schema.get(mapping['recommendation_result'], {}).get('type') != 1 or
                          schema.get(mapping['recommended_assignee'], {}).get('type') != 11):
@@ -46,14 +49,18 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
         demand = {key: fields.get(mapping[key]) for key in
                   ("title", "description", "department", "platform", "deadline", "notes") if key in mapping}
         rules = load_daily_rules(feishu)
-        department, eligible = select_department(demand.get("department"), rules)
+        department = resolve_department(fields.get(mapping["creator"]), rules, feishu)
+        demand["department"] = department
+        department, eligible = select_department(department, rules)
         options = [item["name"] for item in schema[type_name].get("property", {}).get("options", [])]
         levels = {item["name"] for item in schema[level_name].get("property", {}).get("options", [])}
         if not options or not {"A", "B", "C"} <= levels:
             raise ValueError("工作类型或分类等级选项配置不完整")
         missing = [mapping[key] for key in ("title", "description") if not demand.get(key)]
         logger.info("需求读取完成：record_id=%s field_count=%d", record_id, len(demand))
-        if missing:
+        if department is None:
+            result = review("创建人员部门未知", [], None)
+        elif missing:
             result = review("需求信息不完整", missing, department)
         else:
             attachment_name = mapping.get("attachments")
@@ -72,7 +79,7 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
             result = AIClient(feishu.settings).classify(demand, eligible, options, material.images, department, material=material)
         score = None
         rule = None
-        explanation = format_result(result, rules)
+        explanation = "创建人员部门未知" if department is None else format_result(result, rules)
         if result["matched"]:
             rule = next(r for r in rules if r["record_id"] == result["rule_id"])
             score = load_score(rule.get("load_score"))
@@ -80,7 +87,7 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
                 explanation += "\n\n负载分：规则分数缺失或无效，待补充后重新处理。"
                 logger.warning("命中规则缺少有效负载分：record_id=%s rule_id=%s", record_id, rule["record_id"])
         updates = {result_name: explanation, type_name: result["work_type"],
-                   level_name: result["level"], score_name: score}
+                   level_name: result["level"], score_name: score, mapping["department"]: department}
         pending = None
         if recommending:
             try:
