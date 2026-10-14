@@ -71,11 +71,11 @@ class FeishuClient:
                 self._expires_at = time.monotonic() + max(0, data["expire"] - 60)
             return self._token
 
-    def send_card(self, user_id: str, content: dict, message_uuid: str) -> str:
-        """功能说明：应用机器人发送私聊卡片，同一 UUID 支持安全重试。参数 user_id：租户内员工 ID；content：Card 2.0 内容；message_uuid：通知幂等键。返回值：消息 ID。"""
-        data = self._request("POST", "/im/v1/messages", params={"receive_id_type": "user_id"},
+    def send_card(self, open_id: str, content: dict, message_uuid: str) -> str:
+        """功能说明：应用机器人发送私聊卡片，同一 UUID 支持安全重试。参数 open_id：通知应用下的人员 Open ID；content：Card 2.0 内容；message_uuid：通知幂等键。返回值：消息 ID。"""
+        data = self._request("POST", "/im/v1/messages", params={"receive_id_type": "open_id"},
                              headers={"Authorization": f"Bearer {self._access_token()}"},
-                             json={"receive_id": user_id, "msg_type": "interactive",
+                             json={"receive_id": open_id, "msg_type": "interactive",
                                    "content": json.dumps(content, ensure_ascii=False), "uuid": message_uuid})
         return data["data"]["message_id"]
 
@@ -99,6 +99,12 @@ class FeishuClient:
     def get_contact_user(self, user_id: str) -> dict:
         """功能说明：查询人员所属部门。参数 user_id：当前应用下的人员 open_id。返回值：人员信息。"""
         return self._get_contact("users", user_id, "user")
+
+    def get_contact_user_by_union_id(self, union_id: str) -> dict:
+        """功能说明：查询同一租户人员在当前应用下的身份。参数 union_id：跨应用人员标识。返回值：包含当前应用 Open ID 的人员信息。"""
+        return self._request("GET", f"/contact/v3/users/{quote(union_id, safe='')}",
+                             params={"user_id_type": "union_id"},
+                             headers={"Authorization": f"Bearer {self._access_token()}"})["data"]["user"]
 
     def get_contact_department(self, department_id: str) -> dict:
         """功能说明：查询部门及上级节点。参数 department_id：部门 open_department_id。返回值：部门信息。"""

@@ -37,13 +37,13 @@ def load_notifications(path):
     for person in people:
         if not isinstance(person, dict) or type(person.get("enabled")) is not bool:
             raise ValueError("每个通知人员必须配置 enabled 布尔值")
-        uid = person.get("user_id", "")
-        if not isinstance(uid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", uid):
-            raise ValueError("通知人员需填写租户内 user_id")
+        uid = person.get("open_id", "")
+        if not isinstance(uid, str) or not re.fullmatch(r"ou_[A-Za-z0-9]{1,125}", uid):
+            raise ValueError("通知人员需填写通知应用下的 open_id（ou_ 开头）")
         if not isinstance(person.get("name"), str) or not person["name"].strip():
             raise ValueError("通知人员需填写 name")
         if uid in seen:
-            raise ValueError("通知人员 user_id 不可重复")
+            raise ValueError("通知人员 open_id 不可重复")
         seen.add(uid)
     return config
 
@@ -59,16 +59,28 @@ def notification_content(record_id, fields, mapping, settings, feishu, source_na
     def value(key):
         return fields.get(mapping.get(key))
 
+    bot = FeishuClient(replace(settings, app_id=settings.alert_app_id, app_secret=settings.alert_app_secret))
+    resolved = {}
+
     def people(key):
         result = []
         for person in value(key) or []:
             if not isinstance(person, dict) or not person.get("name"):
                 raise ValueError("通知人员显示名称缺失，待重新读取记录")
-            # 不同应用的 Open ID 不通用，使用数据应用查询租户员工 ID。
+            # 卡片引用需使用通知应用的 Open ID，通过 Union ID 关联同一人员。
             try:
-                uid = feishu.get_contact_user(person["id"]).get("user_id", "")
-                if not isinstance(uid, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", uid):
-                    raise ValueError("员工 ID 不可用")
+                source_id = person["id"]
+                if source_id not in resolved:
+                    if settings.app_id == settings.alert_app_id:
+                        resolved[source_id] = source_id
+                    else:
+                        union_id = feishu.get_contact_user(source_id).get("union_id")
+                        if not isinstance(union_id, str) or not union_id.startswith("on_"):
+                            raise ValueError("人员 Union ID 不可用")
+                        resolved[source_id] = bot.get_contact_user_by_union_id(union_id).get("open_id", "")
+                uid = resolved[source_id]
+                if not isinstance(uid, str) or not re.fullmatch(r"ou_[A-Za-z0-9]{1,125}", uid):
+                    raise ValueError("通知应用 Open ID 不可用")
                 result.append(f'<at id="{uid}"></at>')
             except Exception:
                 logger.warning("通知人员引用不可用，使用姓名展示")
@@ -119,7 +131,7 @@ def send_new_task(record_id, mapping, feishu):
     content = None
     for person in recipients:
         # 按应用、表、记录和接收人去重；锁覆盖发送与落盘，供后台和 CLI 共用。
-        identity = [settings.alert_app_id, settings.base_token, settings.table_id, record_id, person["user_id"], "new_task"]
+        identity = [settings.alert_app_id, settings.base_token, settings.table_id, record_id, person["open_id"], "new_task"]
         key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
         path = folder / f"{key}.json"
         try:
@@ -138,7 +150,7 @@ def send_new_task(record_id, mapping, feishu):
                         content = notification_content(record_id, fields, mapping, settings, feishu, config.get("source_name", "需求任务表"))
                     state = {"sent": False, "started_at": time.time(), "content": content}
                     save_state(path, state)
-                message_id = bot.send_card(person["user_id"], state["content"], key[:50])
+                message_id = bot.send_card(person["open_id"], state["content"], key[:50])
                 save_state(path, {"sent": True, "message_id": message_id})
                 logger.info("新增通知已发送 接收人=%s", person["name"])
         except Exception as exc:

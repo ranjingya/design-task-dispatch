@@ -1,19 +1,19 @@
-# 每条任务发送前读取；人员 user_id 为租户内员工 ID，可用于独立通知应用。
+# 每条任务发送前读取；open_id 必须属于 FEISHU_ALERT_APP_ID 对应的通知应用。
 [new_task]
 enabled = true
 source_name = "美工组任务分配与月度看板 | 测试版"
 
 [[new_task.recipients]]
 name = "软糖"
-user_id = "75d3978a"
+open_id = "ou_afa34b7ebd0777a481a6bf4d87e04c70"
 enabled = false
 
 [[new_task.recipients]]
 name = "饭团"
-user_id = "b1dgf2e3"
+open_id = "ou_6acfdbc81b7bf710ecf81bea7e0ceb27"
 enabled = false
 
 [[new_task.recipients]]
 name = "鸭腿"
-user_id = "5gd5ag1a"
+open_id = "ou_cf378d4610826e6dc9deb27a2d212ce2"
 enabled = true

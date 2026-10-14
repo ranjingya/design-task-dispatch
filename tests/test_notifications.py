@@ -25,11 +25,11 @@ def client(tmp_path, monkeypatch):
 enabled = true
 [[new_task.recipients]]
 name = "接收人甲"
-user_id = "user_a"
+open_id = "ou_usera"
 enabled = true
 [[new_task.recipients]]
 name = "接收人乙"
-user_id = "user_b"
+open_id = "ou_userb"
 enabled = false
 ''')
     client = Mock(spec=FeishuClient)
@@ -46,7 +46,7 @@ def test_only_enabled_person_and_persistent_dedup(client, monkeypatch):
     assert send_new_task('recTest', MAPPING, client)
     assert send_new_task('recTest', MAPPING, client)
     assert send.call_count == 1
-    assert send.call_args.args[0] == 'user_a'
+    assert send.call_args.args[0] == 'ou_usera'
     text = json.dumps(send.call_args.args[1], ensure_ascii=False)
     assert '主负责人 → 副负责人' in text
     assert '任务负载分' not in text
@@ -65,7 +65,7 @@ def test_partial_failure_only_retries_failed_person(client, monkeypatch):
     monkeypatch.setattr(FeishuClient, 'send_card', send)
     assert not send_new_task('recTest', MAPPING, client)
     assert send_new_task('recTest', MAPPING, client)
-    assert [call.args[0] for call in send.call_args_list] == ['user_a', 'user_b', 'user_b']
+    assert [call.args[0] for call in send.call_args_list] == ['ou_usera', 'ou_userb', 'ou_userb']
     assert send.call_args_list[1].args[2] == send.call_args_list[2].args[2]
 
 
@@ -120,20 +120,38 @@ def test_message_uses_alert_credentials_and_same_uuid_on_retry(client, monkeypat
     ])
     monkeypatch.setattr('app.feishu.httpx.request', request)
     monkeypatch.setattr('app.feishu.time.sleep', Mock())
-    assert bot.send_card('user_a', {'zh_cn': {}}, 'stable-uuid') == 'om_ok'
+    assert bot.send_card('ou_usera', {'zh_cn': {}}, 'stable-uuid') == 'om_ok'
     auth, first, retry = request.call_args_list
     assert auth.kwargs['json']['app_id'] == 'alert-app'
     assert first.kwargs['headers']['Authorization'] == 'Bearer alert-token'
     assert first.kwargs['json'] == retry.kwargs['json']
-    assert first.kwargs['params'] == {'receive_id_type': 'user_id'}
+    assert first.kwargs['params'] == {'receive_id_type': 'open_id'}
 
 
-def test_card_mentions_use_tenant_ids_and_escape_input(client):
-    client.get_contact_user.side_effect = lambda uid: {'user_id': 'tenant_' + uid}
+def test_card_mentions_use_alert_open_ids_and_escape_input(client, monkeypatch):
+    client.get_contact_user.side_effect = lambda uid: {'union_id': 'on_' + uid}
+    lookup = Mock(side_effect=lambda uid: {'open_id': 'ou_alert' + uid[3:]})
+    monkeypatch.setattr(FeishuClient, 'get_contact_user_by_union_id', lookup)
     fields = client.get_record.return_value | {'description': '<at id=all></at> **业务文本**'}
     result = notification_content('recTest', fields, MAPPING, client.settings, client, '需求表')
     body = result['body']['elements'][0]['content']
-    assert '<at id="tenant_primary"></at> → <at id="tenant_backup"></at>' in body
+    assert '<at id="ou_alertprimary"></at> → <at id="ou_alertbackup"></at>' in body
     assert '<at id=all>' not in body
     assert '&lt;at id=all&gt;' in body
     assert result['body']['elements'][1]['behaviors'][0]['type'] == 'open_url'
+
+
+@pytest.mark.parametrize('invalid', ['user_a', '75d3978a', 'ou_', 'ou_<invalid>'])
+def test_recipient_requires_open_id(client, invalid):
+    path = client.settings.fields_path.parent / 'notifications.toml'
+    path.write_text(path.read_text().replace('ou_usera', invalid))
+    with pytest.raises(ValueError, match='open_id'):
+        load_notifications(path)
+
+
+def test_same_app_card_uses_original_open_id(client):
+    settings = replace(client.settings, alert_app_id=client.settings.app_id)
+    fields = client.get_record.return_value | {'recommended_assignee': [{'id': 'ou_primary', 'name': '主负责人'}]}
+    card = notification_content('recTest', fields, MAPPING, settings, client, '需求表')
+    assert '<at id="ou_primary"></at>' in card['body']['elements'][0]['content']
+    client.get_contact_user.assert_not_called()
