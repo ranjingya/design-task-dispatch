@@ -7,6 +7,7 @@ services:
       - .env
     environment:
       TZ: Asia/Shanghai
+      LOG_DIR: /app/logs
       FIELD_MAPPING_PATH: /app/config/fields.json
       RULE_FIELD_MAPPING_PATH: /app/config/rule_fields.json
       RULES_CACHE_PATH: /app/cache/rules.json
@@ -17,6 +18,7 @@ services:
       - ./config:/app/config:ro
       - ./prompts:/app/prompts:ro
       - rules-cache:/app/cache
+      - ./logs:/app/logs
     labels:
       traefik.enable: "true"
       traefik.docker.network: traefik-network

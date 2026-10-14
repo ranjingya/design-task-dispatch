@@ -48,3 +48,39 @@ def test_http_success_silent_and_errors_visible():
     for status in (200, 202, 401, 500):
         record = logging.LogRecord("gunicorn.access", logging.INFO, "", 0, "%(s)s", ({"s": str(status)},), None)
         assert filt.filter(record) is (status >= 400)
+
+
+def test_file_logs_rotate_keep_permissions_and_no_duplicate_handlers(tmp_path, monkeypatch):
+    """验证文件落盘、重复初始化、轮转备份及文件权限。"""
+    from app.task_logging import configure_logging, TaskFileHandler
+    root = logging.getLogger()
+    original_handlers, level = list(root.handlers), root.level
+    original_formatters = {h: h.formatter for h in original_handlers}
+    access = logging.getLogger('gunicorn.access')
+    original_filters = list(access.filters)
+    monkeypatch.setenv('LOG_DIR', str(tmp_path / 'logs'))
+    try:
+        configure_logging()
+        configure_logging()
+        handlers = [h for h in root.handlers if isinstance(h, TaskFileHandler)]
+        assert len(handlers) == 1
+        handler = handlers[0]
+        handler.maxBytes, handler.backupCount = 180, 2
+        for index in range(15):
+            root.info('任务日志轮转验证 序号=%s 内容可正常读取', index)
+        files = list((tmp_path / 'logs').glob('app.log*'))
+        assert len(files) == 3
+        assert '序号=14' in (tmp_path / 'logs/app.log').read_text()
+        assert all(p.stat().st_mode & 0o777 == 0o640 for p in files)
+    finally:
+        for h in list(root.handlers):
+            if h not in original_handlers:
+                root.removeHandler(h)
+                for name in ('gunicorn.access', 'gunicorn.error'):
+                    logging.getLogger(name).removeHandler(h)
+                h.close()
+        root.handlers = original_handlers
+        root.setLevel(level)
+        for h, formatter in original_formatters.items():
+            h.setFormatter(formatter)
+        access.filters = original_filters

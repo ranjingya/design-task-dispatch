@@ -116,5 +116,8 @@ jobs:
               docker run --rm --entrypoint cat "$image" /app/prompts/classify.md > prompts/classify.md.tmp
               mv prompts/classify.md.tmp prompts/classify.md
             fi
+            # 绑定目录由宿主机持有，启动服务前赋予容器用户写入权限。
+            mkdir -p logs
+            docker run --rm --user 0:0 --entrypoint sh -v "$PWD/logs:/logs" "$image" -c 'chown -R 10001:10001 /logs && chmod 0750 /logs'
             docker compose up -d --remove-orphans design-task-dispatch
             docker image prune -f

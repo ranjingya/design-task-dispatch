@@ -9,7 +9,8 @@ RUN uv sync --frozen --no-dev
 COPY app ./app
 COPY config ./config
 COPY prompts ./prompts
-RUN useradd --uid 10001 --create-home app && mkdir /app/cache && chown app:app /app/cache
+RUN groupadd --gid 10001 app && useradd --uid 10001 --gid 10001 --create-home app \
+    && mkdir /app/cache /app/logs && chown app:app /app/cache /app/logs && chmod 0750 /app/logs
 USER app
 EXPOSE 8000
 CMD [".venv/bin/gunicorn", "--bind", "0.0.0.0:8000", "--workers", "1", "--threads", "4", "--access-logfile", "-", "--error-logfile", "-", "app.main:create_app()"]

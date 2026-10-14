@@ -16,9 +16,9 @@ logger = logging.getLogger(__name__)
 
 def create_app(settings: Settings | None = None, dispatcher=None) -> Flask:
     """功能说明：创建应用。参数 settings：可选运行配置；dispatcher：可选后台处理器。返回值：Flask 应用。"""
+    settings = settings or Settings.from_env()
     configure_logging()
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    settings = settings or Settings.from_env()
     load_fields(settings.fields_path)
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 16 * 1024
