@@ -79,3 +79,18 @@ def test_bitable_not_ready_is_retryable(monkeypatch, status):
     monkeypatch.setattr('app.feishu.time.sleep', Mock())
     assert FeishuClient._request('GET', '/example')['code'] == 0
     assert request.call_count == 2
+
+
+def test_cli_can_retry_notification_without_ai(monkeypatch):
+    settings = Mock()
+    monkeypatch.setattr('app.cli.Settings.from_env', Mock(return_value=settings))
+    monkeypatch.setattr('app.cli.load_fields', Mock(return_value={'title': '标题'}))
+    client = Mock()
+    monkeypatch.setattr('app.cli.FeishuClient', Mock(return_value=client))
+    send = Mock(return_value=True)
+    monkeypatch.setattr('app.cli.send_new_task', send)
+    post = Mock()
+    monkeypatch.setattr('app.cli.httpx.post', post)
+    assert main(['notify', 'recExample']) == 0
+    send.assert_called_once_with('recExample', {'title': '标题'}, client)
+    post.assert_not_called()

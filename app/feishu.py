@@ -1,6 +1,7 @@
 """飞书应用身份认证及多维表记录读写。"""
 
 import logging
+import json
 import threading
 import time
 from urllib.parse import quote
@@ -26,7 +27,8 @@ class FeishuClient:
     def _request(method: str, path: str, **kwargs) -> dict:
         """功能说明：调用飞书接口并重试瞬时故障。参数 method：HTTP方法；path：接口路径；kwargs：请求参数。返回值：成功的JSON响应。"""
         # 查询、幂等字段回写和取凭证可重试；创建类请求不自动重放。
-        attempts = 3 if method.upper() in {"GET", "PUT"} or path == "/auth/v3/tenant_access_token/internal" else 1
+        message_retry = method.upper() == "POST" and path == "/im/v1/messages" and bool(kwargs.get("json", {}).get("uuid"))
+        attempts = 3 if method.upper() in {"GET", "PUT"} or path == "/auth/v3/tenant_access_token/internal" or message_retry else 1
         for attempt in range(1, attempts + 1):
             retryable = False
             try:
@@ -68,6 +70,14 @@ class FeishuClient:
                 self._token = data["tenant_access_token"]
                 self._expires_at = time.monotonic() + max(0, data["expire"] - 60)
             return self._token
+
+    def send_card(self, user_id: str, content: dict, message_uuid: str) -> str:
+        """功能说明：应用机器人发送私聊卡片，同一 UUID 支持安全重试。参数 user_id：租户内员工 ID；content：Card 2.0 内容；message_uuid：通知幂等键。返回值：消息 ID。"""
+        data = self._request("POST", "/im/v1/messages", params={"receive_id_type": "user_id"},
+                             headers={"Authorization": f"Bearer {self._access_token()}"},
+                             json={"receive_id": user_id, "msg_type": "interactive",
+                                   "content": json.dumps(content, ensure_ascii=False), "uuid": message_uuid})
+        return data["data"]["message_id"]
 
     def _get_contact(self, resource: str, identity: str, key: str) -> dict:
         """读取通讯录资源，成功响应在进程内缓存一天，失败不缓存。"""

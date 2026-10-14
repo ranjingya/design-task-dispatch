@@ -1,0 +1,19 @@
+# 每条任务发送前读取；人员 user_id 为租户内员工 ID，可用于独立通知应用。
+[new_task]
+enabled = true
+source_name = "美工组任务分配与月度看板 | 测试版"
+
+[[new_task.recipients]]
+name = "软糖"
+user_id = "75d3978a"
+enabled = false
+
+[[new_task.recipients]]
+name = "饭团"
+user_id = "b1dgf2e3"
+enabled = false
+
+[[new_task.recipients]]
+name = "鸭腿"
+user_id = "5gd5ag1a"
+enabled = true

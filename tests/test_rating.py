@@ -501,3 +501,28 @@ def test_normal_task_has_four_summary_lines(feishu, monkeypatch, caplog):
     assert "类型=测试类型 等级=A 分数=2" in messages[2]
     assert "任务完成 结果=回写成功" in messages[3]
     assert all("recSummary" not in line for line in messages[1:])
+
+
+def test_notification_follows_writeback_and_failure_preserves_result(feishu, monkeypatch):
+    mapping = MAPPING | {'recommendation_result': '推荐结果', 'recommended_assignee': '推荐人'}
+    feishu.get_fields.return_value = SCHEMA + [{'field_name': '推荐结果', 'type': 1}, {'field_name': '推荐人', 'type': 11}]
+    monkeypatch.setattr(AIClient, 'classify', Mock(return_value=RATED))
+    monkeypatch.setattr('app.dispatch.recommend', Mock(return_value=({'推荐结果': '人工分配', '推荐人': []}, None)))
+    def notify(record_id, used_mapping, client):
+        assert client.update_record.call_args.args[1]['结果'].startswith('已匹配')
+        assert client.update_record.call_args.args[1]['推荐结果'] == '人工分配'
+        raise RuntimeError('通知失败')
+    monkeypatch.setattr('app.dispatch.send_new_task', notify)
+    process_record('recTest', mapping, feishu)
+    assert feishu.update_record.call_count == 1
+    assert feishu.update_record.call_args.args[1]['结果'].startswith('已匹配')
+
+
+def test_failed_writeback_does_not_notify(feishu, monkeypatch):
+    monkeypatch.setattr(AIClient, 'classify', Mock(return_value=RATED))
+    feishu.update_record.side_effect = RuntimeError('回写失败')
+    notify = Mock()
+    monkeypatch.setattr('app.dispatch.send_new_task', notify)
+    with pytest.raises(RuntimeError):
+        process_record('recTest', MAPPING, feishu)
+    notify.assert_not_called()

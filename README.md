@@ -219,3 +219,21 @@ docker exec design-task-dispatch /app/.venv/bin/python -m app.cli retry <记录I
 容器使用 UID/GID `10001:10001`。CD 在启动前将日志目录归属设置为该用户，目录权限为 `0750`；当前日志文件为 `0640`。手动部署需先创建宿主机日志目录并执行 `sudo chown -R 10001:10001 logs && sudo chmod 0750 logs`，再启动服务。
 
 主、副负责人共用任务推荐名单。未确认任务按每位系统推荐人各计入完整任务分数；组长确认后，按最终负责人名单计入负载。
+
+## 新增需求通知
+
+程序在匹配、人员推荐和多维表回写成功之后读取最新记录，再通过独立应用机器人发送私聊卡片通知。卡片使用紫色「美工任务上新」标题，包含任务名称、需求说明、需求人员、所属平台、推荐负责人（主副顺序）及「查看需求」按钮；底部展示来源表链接。无法准确匹配或需要人工分配时明确显示待确认结果。回写失败时不发送新增通知；通知失败保留已回写的评级和推荐结果。
+
+通知应用在 `.env` 中配置 `FEISHU_ALERT_APP_ID`、`FEISHU_ALERT_APP_SECRET`，需启用机器人能力和 `im:message:send_as_bot` 权限，接收人须处于应用可用范围。数据读取使用 `FEISHU_DATA_APP_ID`、`FEISHU_DATA_APP_SECRET`。消息接口说明见[飞书发送消息文档](https://open.feishu.cn/document/server-docs/im-v1/message/create)。
+
+`config/notifications.toml` 与字段映射放在同一目录，随现有 config 目录只读挂载，每次通知读取。`new_task.enabled` 控制新增通知总开关，`source_name` 设置底部来源名称；每个 `[[new_task.recipients]]` 包含显示名称 `name`、租户内员工 ID `user_id` 和启用开关 `enabled`。这里填写员工 ID，不能填 `ou_` 开头的应用 Open ID。当前配置仅启用鸭腿，软糖和饭团保留为关闭状态；启用相应条目后，下一条新增需求生效。
+
+发送记录保存在规则缓存目录下的 `notifications/`，Docker 中为持久化卷 `/app/cache/notifications/`，由容器用户写入，消息状态文件权限为 0600。按通知应用、Base、表、记录和接收人去重，成功通知在重跑和容器重建后均跳过。网络瞬时故障最多请求三次，复用同一消息 UUID。发送结果未知且超过飞书一小时去重窗口时停止自动补发，需要核对聊天记录与缓存后处理；缓存损坏时同样停止发送。不要清理通知缓存，否则会失去已发送记录。
+
+仅补发未成功的新增通知（不调用 AI、不修改任务）：
+
+```bash
+docker compose exec design-task-dispatch .venv/bin/python -m app.cli notify recXXXXXXXX
+```
+
+上线时同步 `config/notifications.toml` 与通知应用环境变量，再重建容器。缺少 TOML 文件或没有启用的接收人时跳过发送。新增需求自动化保留 HTTP 触发步骤，关闭原来的直接发送消息步骤，避免提前或重复通知。最终负责人、组长确认等通知仍由多维表自动化管理；本次程序入口只负责新增需求通知。

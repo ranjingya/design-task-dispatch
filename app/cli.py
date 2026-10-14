@@ -6,7 +6,9 @@ import re
 
 import httpx
 
-from app.config import Settings
+from app.config import Settings, load_fields
+from app.feishu import FeishuClient
+from app.notifications import send_new_task
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +20,8 @@ def main(argv=None) -> int:
     retry = commands.add_parser("retry", help="按记录 ID 提交重试，后台处理结果请查看日志")
     retry.add_argument("record_id", help="飞书需求记录 ID")
     retry.add_argument("--url", default="http://127.0.0.1:8000", help="运行中服务地址，默认容器内本机地址")
+    notify = commands.add_parser("notify", help="仅补发新增通知，不重新评级；已发送人员自动跳过")
+    notify.add_argument("record_id", help="已完成评级和推荐的飞书需求记录 ID")
     args = parser.parse_args(argv)
     if not re.fullmatch(r"rec[A-Za-z0-9]{1,125}", args.record_id):
         parser.error("record_id 必须是有效的飞书记录 ID")
@@ -25,6 +29,8 @@ def main(argv=None) -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     try:
         settings = Settings.from_env()
+        if args.command == "notify":
+            return 0 if send_new_task(args.record_id, load_fields(settings.fields_path), FeishuClient(settings)) else 1
         response = httpx.post(args.url.rstrip("/") + "/webhook/task",
                               headers={"X-Webhook-Token": settings.webhook_token},
                               json={"record_id": args.record_id}, timeout=30)
@@ -40,8 +46,8 @@ def main(argv=None) -> int:
             logger.error("服务返回了未知的接收状态")
             return 1
         return 0
-    except (httpx.RequestError, ValueError) as exc:
-        logger.error("重试提交失败：error_type=%s", type(exc).__name__)
+    except (httpx.RequestError, ValueError, RuntimeError, OSError) as exc:
+        logger.error("命令执行失败：%s", exc)
         return 1
 
 

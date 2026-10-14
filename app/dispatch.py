@@ -13,6 +13,7 @@ from app.config import Settings, load_fields
 from app.feishu import FeishuClient
 from app.rules import select_department, review, format_result, load_score
 from app.rule_cache import load_daily_rules
+from app.notifications import send_new_task
 from app.recommendation import protected, recommend, save_rotation, format_recommendation
 
 from app.task_logging import task_context, task_details
@@ -154,6 +155,16 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
         except Exception as exc:
             logger.warning("失败提示回写失败 error=%s", exc)
         raise
+
+    # 通知独立于评级异常处理，失败不能把成功的匹配结果覆盖成处理失败。
+    if recommending:
+        task_details(stage="新增通知")
+        try:
+            if not send_new_task(record_id, mapping, feishu):
+                task_details(outcome="回写成功，通知待补发")
+        except Exception as exc:
+            task_details(outcome="回写成功，通知待补发")
+            logger.warning("新增通知失败 原因=%s", exc)
 
 
 class Dispatcher:
