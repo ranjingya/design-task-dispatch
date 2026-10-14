@@ -54,5 +54,12 @@
       "素材图"
     ],
     "long_image_ratio": 3
-  }
+  },
+  "max_online_resources": 10,
+  "max_embed_depth": 3,
+  "max_doc_blocks": 2000,
+  "max_base_fields": 100,
+  "max_base_records": 100,
+  "word_converter": "soffice",
+  "word_conversion_timeout": 60
 }

@@ -23,8 +23,14 @@ def read_document(data: bytes, suffix: str, source: str, material) -> None:
         read_pdf(data, source, material)
     elif suffix == ".xls":
         read_xls(data, source, material)
-    else:
+    elif suffix == ".xlsx":
         read_xlsx(data, source, material)
+    elif suffix == ".docx":
+        read_docx(data, source, material)
+    elif suffix == ".doc":
+        read_doc(data, source, material)
+    else:
+        raise ValueError("文档类型暂不支持")
 
 
 def read_xlsx(data: bytes, source: str, material) -> None:
@@ -164,3 +170,101 @@ def read_pdf(data: bytes, source: str, material) -> None:
                     visual_options = material.config["visual_review"]
                     required = not text.strip() or any(word in text for word in visual_options["instruction_keywords"] + visual_options["image_reference_keywords"])
                     material.add_image(output.getvalue(), label, group=source, context=text[:2000], requires_detail=required)
+
+
+def read_docx(data: bytes, source: str, material) -> None:
+    """功能说明：按 Word 段落与表格顺序提取文字和内嵌图片。参数 data：DOCX字节；source：来源名称；material：共享材料收集器。返回值：无。"""
+    with ZipFile(io.BytesIO(data)) as archive:
+        if sum(item.file_size for item in archive.infolist()) > material.config['max_unpacked_bytes']:
+            raise ValueError('Word 解压后大小超过上限')
+        names = set(archive.namelist())
+        if 'word/document.xml' not in names:
+            raise ValueError('Word 文档结构无效')
+        parts = ['word/document.xml'] + sorted(name for name in names if re_word_part(name))
+        count = 0
+        for part in parts:
+            root = ElementTree.fromstring(archive.read(part))
+            rel_path = posixpath.dirname(part) + '/_rels/' + posixpath.basename(part) + '.rels'
+            relations = {r.attrib['Id']: r.attrib for r in ElementTree.fromstring(archive.read(rel_path))} if rel_path in names else {}
+            for paragraph in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'):
+                count += 1
+                if count > material.config['max_doc_blocks']:
+                    material.issue(source, 'Word 段落数量超过上限')
+                    return
+                # 跳过修订中已删除的文字，保留表格单元格中的段落。
+                text = ''.join(node.text or '' for node in paragraph.iter() if node.tag.endswith('}t'))
+                label = f'{source} / {posixpath.basename(part)} / 段落{count}'
+                if text and not material.add_text(label, text):
+                    return
+                for node in paragraph.iter():
+                    if node.tag.endswith(('}blip', '}imagedata')):
+                        relation_id = next((v for k, v in node.attrib.items() if k.endswith(('}embed', '}id', '}link'))), None)
+                        relation = relations.get(relation_id, {})
+                        target = relation.get('Target', '')
+                        if relation.get('TargetMode') == 'External':
+                            material.issue(label, '图片为外部链接，未下载；请将图片嵌入文档')
+                            continue
+                        target = target.lstrip('/') if target.startswith('/') else posixpath.normpath(posixpath.dirname(part) + '/' + target)
+                        if not target.startswith('word/') or target not in names:
+                            material.issue(label, '内嵌图片关系无效')
+                            continue
+                        if not material.image_available(label):
+                            continue
+                        try:
+                            keywords = material.config['visual_review']['instruction_keywords'] + material.config['visual_review']['image_reference_keywords']
+                            material.add_image(archive.read(target), label, group=source, context=text,
+                                               requires_detail=not text.strip() or any(word in text for word in keywords))
+                        except Exception:
+                            material.issue(label, 'Word 内嵌图片无法解析')
+            if any(node.tag.endswith(('}altChunk', '}object', '}chart', '}smartArt')) for node in root.iter()):
+                material.issue(source, 'Word 包含暂不能完整读取的嵌入对象或图表')
+        if any(name.startswith(('word/embeddings/', 'word/diagrams/')) for name in names):
+            material.issue(source, 'Word 包含嵌入文件或 SmartArt，请提供独立资料')
+
+
+def re_word_part(name):
+    """识别页眉、页脚、脚注、尾注和批注正文。"""
+    import re
+    return bool(re.fullmatch(r'word/(?:header\d+|footer\d+|footnotes|endnotes|comments)\.xml', name))
+
+
+def read_doc(data: bytes, source: str, material) -> None:
+    """功能说明：在隔离临时目录将旧 Word 转成 PDF 后读取图文。参数 data：DOC字节；source：来源名称；material：共享材料收集器。返回值：无。"""
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    if not data.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'):
+        raise ValueError('旧版 DOC 文件格式无效，请提供真正的 DOC 或 DOCX 文件')
+    with tempfile.TemporaryDirectory(prefix='demand-word-') as directory:
+        root = Path(directory)
+        document = root / 'material.doc'
+        document.write_bytes(data)
+        profile = root / 'profile'
+        profile.mkdir()
+        # 独立转换配置禁用宏，不复用桌面会话或用户配置。
+        (profile / 'user').mkdir()
+        (profile / 'user/registrymodifications.xcu').write_text('''<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry">
+<item oor:path="/org.openoffice.Office.Common/Security/Scripting"><prop oor:name="MacroSecurityLevel" oor:op="fuse"><value>3</value></prop></item>
+<item oor:path="/org.openoffice.Office.Writer/Content/Update"><prop oor:name="Link" oor:op="fuse"><value>2</value></prop></item>
+</oor:items>''')
+        try:
+            subprocess.run([material.config['word_converter'], '-env:UserInstallation=' + profile.as_uri(),
+                            '--headless', '--nologo', '--nodefault', '--norestore',
+                            '--convert-to', 'pdf:writer_pdf_Export', '--outdir', str(root), str(document)],
+                           check=True, timeout=material.config['word_conversion_timeout'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            raise RuntimeError('服务器未安装旧版 Word 转换器，请安装 LibreOffice Writer') from None
+        except subprocess.TimeoutExpired:
+            raise RuntimeError('旧版 Word 转换超时，请简化文件或另存为 DOCX') from None
+        except subprocess.CalledProcessError:
+            raise ValueError('旧版 Word 转换失败，文件可能损坏或加密') from None
+        output = root / 'material.pdf'
+        if not output.exists() or not output.stat().st_size:
+            raise ValueError('旧版 Word 未生成可读文件，请检查加密或损坏情况')
+        if output.stat().st_size > material.file_limit():
+            raise ValueError('Word 转换结果超过大小上限')
+        converted = output.read_bytes()
+        material.file_size += len(converted)
+        read_pdf(converted, source, material)

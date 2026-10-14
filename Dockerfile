@@ -1,5 +1,7 @@
 FROM python:3.14-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-writer fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 RUN pip install --no-cache-dir uv==0.11.29
 COPY pyproject.toml uv.lock ./

@@ -1,4 +1,4 @@
-"""整理需求附件与在线表格，控制材料读取限额。"""
+"""整理需求附件与飞书在线资料，控制材料读取限额。"""
 
 import base64
 import logging
@@ -17,7 +17,20 @@ class MaterialBundle:
         self.settings, self.config = settings, config
         self.texts, self.images, self.issues, self.image_sources = [], [], [], []
         self.image_parts = []
-        self.text_size = self.image_size = self.file_size = 0
+        self.text_size = self.image_size = self.file_size = self.file_count = 0
+
+    def file_limit(self):
+        """返回当前文件允许读取的字节数，所有来源共用总限额。"""
+        limit = min(self.config['max_file_bytes'], self.config['max_total_file_bytes'] - self.file_size)
+        if limit <= 0:
+            raise ValueError('本次材料总大小超过上限')
+        return limit
+
+    def claim_file(self):
+        """登记一个参与解析的文件，超出限额时终止读取。"""
+        self.file_count += 1
+        if self.file_count > self.config['max_files']:
+            raise ValueError('本次材料文件数量超过上限')
 
     def issue(self, source, reason):
         value = f"{source}：{reason}"
@@ -100,7 +113,7 @@ def sheet_token(value, config):
 
 
 def collect_materials(attachments, document_link, record_id, field_id, feishu):
-    """功能说明：读取附件与在线电子表格供评级。参数 attachments：附件列表；document_link：需求文档链接；record_id：记录 ID；field_id：附件字段 ID；feishu：飞书客户端。返回值：含文本、图片、来源及缺口的材料集合。"""
+    """功能说明：读取附件与飞书在线资料供评级。参数 attachments：附件列表；document_link：需求文档链接；record_id：记录 ID；field_id：附件字段 ID；feishu：飞书客户端。返回值：含文本、图片、来源及缺口的材料集合。"""
     import json
     from pathlib import Path
     from app.documents import read_document
@@ -110,9 +123,12 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
     logger.debug("加载材料配置：%s", path)
     config = json.loads(path.read_text(encoding="utf-8"))
     for key in ("max_files", "max_file_bytes", "max_total_file_bytes", "max_unpacked_bytes", "max_cells", "max_sheets",
-                "max_pdf_pages", "max_text_chars", "image_long_edge", "export_attempts", "export_interval_seconds"):
+                "max_pdf_pages", "max_text_chars", "image_long_edge", "export_attempts", "export_interval_seconds",
+                "max_online_resources", "max_embed_depth", "max_doc_blocks", "max_base_fields", "max_base_records", "word_conversion_timeout"):
         if type(config.get(key)) is not int or config[key] <= 0:
             raise ValueError(f"材料配置 {key} 必须为正整数")
+    if not isinstance(config.get("word_converter"), str) or not config["word_converter"].strip():
+        raise ValueError("Word 转换器配置无效")
     if not isinstance(config.get("allowed_sheet_hosts"), list) or type(config.get("skip_hidden_sheets")) is not bool:
         raise ValueError("材料域名或隐藏工作表配置无效")
     from app.visual_review import visual_config
@@ -121,8 +137,9 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
     if not isinstance(attachments, list):
         raise ValueError("附件字段格式错误")
     mime_suffix = {"application/pdf": ".pdf", "application/vnd.ms-excel": ".xls",
-                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx"}
-    processed = 0
+                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+                   "application/msword": ".doc",
+                   "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx"}
     for index, item in enumerate(attachments, 1):
         source = f"附件 {index}"
         try:
@@ -136,11 +153,9 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
                 bundle.add_text(source, "素材压缩包不参与识别，未读取内容")
                 logger.debug("跳过素材压缩包：record_id=%s index=%d", record_id, index)
                 continue
-            processed += 1
-            if processed > config["max_files"]:
-                raise ValueError("附件数量超过上限")
+            bundle.claim_file()
             image_file = mime in ("image/png", "image/jpeg", "image/webp") or suffix in (".png", ".jpg", ".jpeg", ".webp")
-            if not image_file and suffix not in (".xlsx", ".xls", ".pdf"):
+            if not image_file and suffix not in (".xlsx", ".xls", ".pdf", ".docx", ".doc"):
                 raise ValueError("附件格式暂不支持")
             limit = min(config["max_file_bytes"], config["max_total_file_bytes"] - bundle.file_size)
             if limit <= 0 or item.get("size", 0) > limit:
@@ -162,19 +177,24 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
             logger.warning("附件解析异常 index=%d error_type=%s", index, type(exc).__name__)
             bundle.issue(source, "文件损坏、加密或包含无法解析的内容")
     if document_link:
-        source = "需求文档链接"
+        from app.online_materials import OnlineReader, document_links
+        reader = OnlineReader(feishu, bundle)
         try:
-            token = sheet_token(document_link, config)
-            limit = min(config["max_file_bytes"], config["max_total_file_bytes"] - bundle.file_size)
-            if limit <= 0 or processed >= config["max_files"]:
-                raise ValueError("本次材料数量或大小已达上限")
-            data = feishu.export_sheet(token, limit, config["export_attempts"], config["export_interval_seconds"])
-            bundle.file_size += len(data)
-            read_document(data, ".xlsx", source, bundle)
-        except (ValueError, RuntimeError) as exc:
-            bundle.issue(source, str(exc))
-        except Exception as exc:
-            logger.warning("在线电子表格解析异常：error_type=%s", type(exc).__name__)
-            bundle.issue(source, "在线表格无法完整解析")
+            links = document_links(document_link)
+        except ValueError as exc:
+            bundle.issue('需求文档链接', str(exc))
+            links = []
+        for index, link in enumerate(links, 1):
+            source = f'需求文档链接 {index}'
+            if index > config['max_online_resources']:
+                bundle.issue(source, '在线资料数量超过上限')
+                break
+            try:
+                reader.read_link(link, source)
+            except (ValueError, RuntimeError) as exc:
+                bundle.issue(source, str(exc))
+            except Exception as exc:
+                logger.warning('在线资料解析异常 error_type=%s', type(exc).__name__)
+                bundle.issue(source, '在线资料无法完整解析')
     logger.debug("材料整理完成：record_id=%s text_chars=%d images=%d issues=%d elapsed=%.2fs", record_id, bundle.text_size, len(bundle.images), len(bundle.issues), time.monotonic() - started)
     return bundle

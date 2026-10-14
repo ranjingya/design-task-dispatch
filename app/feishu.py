@@ -201,3 +201,50 @@ class FeishuClient:
             if attempt + 1 < attempts:
                 time.sleep(interval)
         raise RuntimeError("电子表格导出超时，请稍后重试")
+
+    def material_get(self, path: str, params: dict | None = None) -> dict:
+        """功能说明：读取在线材料的官方接口并区分访问错误。参数 path：官方 API 路径；params：查询参数。返回值：响应 data。"""
+        try:
+            return self._request("GET", path, params=params,
+                                 headers={"Authorization": f"Bearer {self._access_token()}"})["data"]
+        except RuntimeError as exc:
+            message = str(exc)
+            if any(code in message for code in ("HTTP=403", "code=99991672")):
+                raise RuntimeError("应用没有读取权限，请为应用开通接口权限并授予该资料阅读权限") from None
+            if "HTTP=404" in message:
+                raise RuntimeError("资料不存在或当前应用不可见，请核对链接及访问权限") from None
+            raise RuntimeError(f"在线资料读取失败（并非链接格式错误）：{message}") from None
+
+    def material_list(self, path: str, limit: int, params: dict | None = None) -> tuple[list, bool]:
+        """功能说明：限量读取分页材料。参数 path：官方资源路径；limit：项目上限；params：视图等筛选参数。返回值：项目列表及是否超限。"""
+        items, cursors = [], set()
+        query = dict(params or {})
+        query['page_size'] = min(limit, 100)
+        while True:
+            data = self.material_get(path, query)
+            rows = data.get('items', [])
+            if not isinstance(rows, list):
+                raise RuntimeError('在线资料返回了无效列表')
+            items.extend(rows)
+            if len(items) > limit or (len(items) == limit and data.get('has_more')):
+                return items[:limit], True
+            if not data.get('has_more'):
+                return items, False
+            cursor = data.get('page_token')
+            if not cursor or cursor in cursors:
+                raise RuntimeError('在线资料分页异常，无法确认内容完整')
+            cursors.add(cursor)
+            query['page_token'] = cursor
+
+    def download_material_media(self, token: str, limit: int, *, table_id=None, record_id=None, field_id=None) -> bytes:
+        """功能说明：下载在线文档或多维表中的素材。参数 token：素材令牌；limit：字节上限；table_id：可选来源表；record_id：来源记录；field_id：附件字段。返回值：素材字节。"""
+        import json
+        params = None
+        if table_id and record_id and field_id:
+            params = {'extra': json.dumps({'bitablePerm': {'tableId': table_id,
+                      'attachments': {field_id: {record_id: [token]}}}})}
+        return self._download(API + f'/drive/v1/medias/{quote(token, safe="")}/download', limit, params)
+
+    def download_board(self, token: str, limit: int) -> bytes:
+        """下载文档内嵌画板的官方预览图；token 为画板令牌，limit 为字节上限。"""
+        return self._download(API + f'/board/v1/whiteboards/{quote(token, safe="")}/download_as_image', limit)
