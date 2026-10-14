@@ -90,7 +90,7 @@ def notification_content(record_id, fields, mapping, settings, feishu, event="ne
             ("推荐负责人", people("recommended_assignee") or "待人工分配"),
             ("所属平台", escape_text(value("platform")) or "未填写"),
         ]
-    title = "美工任务上新"
+    title = "美工任务上新 · 组长确认"
     if event == "leader_confirmed":
         title = "美工任务上新 · 已分配"
         lines = [("任务名称", escape_text(value("title")) or "未命名需求"),
