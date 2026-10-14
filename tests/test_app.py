@@ -85,3 +85,22 @@ def test_failed_record_can_be_retried(settings):
     finally:
         dispatcher.close()
     assert runner.call_count == 2
+
+
+def test_notification_endpoint_validation_and_failure(settings, monkeypatch):
+    notify = Mock(return_value='sent_or_duplicate')
+    monkeypatch.setattr('app.main.confirmation', notify)
+    dispatcher = Mock()
+    client = create_app(settings, dispatcher).test_client()
+    body = {'record_id': 'recTest', 'event': 'leader_confirmed'}
+    headers = {'X-Webhook-Token': 'test-token'}
+    assert client.post('/webhook/notify', json=body).status_code == 401
+    for invalid in [[], {}, body | {'event': []}, body | {'event': 'unknown'}, body | {'record_id': '../bad'}]:
+        assert client.post('/webhook/notify', json=invalid, headers=headers).status_code == 400
+    notify.assert_not_called()
+    for event in ['leader_confirmed', 'assignee_confirmed']:
+        assert client.post('/webhook/notify', json=body | {'event': event}, headers=headers).status_code == 200
+        assert notify.call_args.args[:2] == ('recTest', event)
+    notify.side_effect = RuntimeError('通知失败')
+    assert client.post('/webhook/notify', json=body, headers=headers).status_code == 503
+    dispatcher.submit.assert_not_called()

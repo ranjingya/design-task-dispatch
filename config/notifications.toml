@@ -16,3 +16,13 @@ enabled = false
 name = "鸭腿"
 open_id = "ou_cf378d4610826e6dc9deb27a2d212ce2"
 enabled = true
+
+# 组长确认：发送给最终负责人中的所有人。
+[leader_confirmed]
+enabled = true
+recipient_field = "assignee"
+
+# 负责人确认：发送给不可编辑的创建人。
+[assignee_confirmed]
+enabled = true
+recipient_field = "creator"

@@ -18,12 +18,12 @@ from app.rules import plain
 logger = logging.getLogger(__name__)
 
 
-def load_notifications(path):
-    """功能说明：读取通知配置。参数 path：TOML 路径。返回值：通过校验的新增需求配置，未启用时返回空字典。"""
+def load_notifications(path, event="new_task"):
+    """功能说明：读取通知配置。参数 path：TOML 路径；event：通知事件。返回值：通过校验的新增需求配置，未启用时返回空字典。"""
     if not path.exists():
         logger.debug("新增通知未配置")
         return {}
-    config = tomllib.loads(path.read_text(encoding="utf-8")).get("new_task", {})
+    config = tomllib.loads(path.read_text(encoding="utf-8")).get(event, {})
     if not isinstance(config, dict) or type(config.get("enabled", False)) is not bool:
         raise ValueError("new_task.enabled 必须是布尔值")
     if not config.get("enabled", False):
@@ -52,8 +52,8 @@ def escape_text(value):
     return re.sub(r"([\\`*_{}\[\]()#+.!~|>-])", r"\\\1", text)
 
 
-def notification_content(record_id, fields, mapping, settings, feishu):
-    """功能说明：按上新样式生成紫色卡片。参数 record_id：记录 ID；fields：回写后字段；mapping：字段映射；settings：数据配置；feishu：人员身份查询客户端。返回值：飞书 Card 2.0 内容。"""
+def notification_content(record_id, fields, mapping, settings, feishu, event="new_task"):
+    """功能说明：按上新样式生成紫色卡片。参数 record_id：记录 ID；fields：回写后字段；mapping：字段映射；settings：数据配置；feishu：人员身份查询客户端；event：通知事件。返回值：飞书 Card 2.0 内容。"""
     def value(key):
         return fields.get(mapping.get(key))
 
@@ -69,33 +69,39 @@ def notification_content(record_id, fields, mapping, settings, feishu):
             try:
                 source_id = person["id"]
                 if source_id not in resolved:
-                    if settings.app_id == settings.alert_app_id:
-                        resolved[source_id] = source_id
-                    else:
-                        union_id = feishu.get_contact_user(source_id).get("union_id")
-                        if not isinstance(union_id, str) or not union_id.startswith("on_"):
-                            raise ValueError("人员 Union ID 不可用")
-                        resolved[source_id] = bot.get_contact_user_by_union_id(union_id).get("open_id", "")
+                    resolved[source_id] = alert_open_id(source_id, feishu, bot)
                 uid = resolved[source_id]
-                if not isinstance(uid, str) or not re.fullmatch(r"ou_[A-Za-z0-9]{1,125}", uid):
-                    raise ValueError("通知应用 Open ID 不可用")
                 result.append(f'<at id="{uid}"></at>')
             except Exception:
                 logger.warning("通知人员引用不可用，使用姓名展示")
                 result.append(escape_text(person["name"]))
         return " ".join(result)
 
-    if not value("rule_explanation") or not value("recommendation_result"):
+    if event == "new_task" and (not value("rule_explanation") or not value("recommendation_result")):
         raise ValueError("匹配与推荐结果尚未就绪，暂不发送通知")
-    if str(value("rule_explanation")).startswith("处理失败"):
+    if event == "new_task" and str(value("rule_explanation")).startswith("处理失败"):
         raise ValueError("任务处理失败，暂不发送新增通知")
-    lines = [
-        ("任务名称", escape_text(value("title")) or "未命名需求"),
-        ("需求说明", escape_text(value("description")) or "未填写"),
-        ("需求人员", people("submitter") or "未填写"),
-        ("推荐负责人", people("recommended_assignee") or "待人工分配"),
-        ("所属平台", escape_text(value("platform")) or "未填写"),
-    ]
+    lines = []
+    if event == "new_task":
+        lines = [
+            ("任务名称", escape_text(value("title")) or "未命名需求"),
+            ("需求说明", escape_text(value("description")) or "未填写"),
+            ("需求人员", people("submitter") or "未填写"),
+            ("推荐负责人", people("recommended_assignee") or "待人工分配"),
+            ("所属平台", escape_text(value("platform")) or "未填写"),
+        ]
+    title = "美工任务上新"
+    if event == "leader_confirmed":
+        title = "美工任务上新 · 已分配"
+        lines = [("任务名称", escape_text(value("title")) or "未命名需求"),
+                 ("需求说明", escape_text(value("description")) or "未填写"),
+                 ("所属平台", escape_text(value("platform")) or "未填写"),
+                 ("需求人员", people("submitter") or "未填写"),
+                 ("最终负责人", people("assignee"))]
+    elif event == "assignee_confirmed":
+        title = "美工任务 · 负责人已接收确认"
+        lines = [("任务名称", escape_text(value("title")) or "未命名需求"),
+                 ("最终负责人", people("assignee"))]
     base = quote(settings.base_token, safe="")
     table = quote(settings.table_id, safe="")
     record = quote(record_id, safe="")
@@ -106,7 +112,7 @@ def notification_content(record_id, fields, mapping, settings, feishu):
          "behaviors": [{"type": "open_url", "default_url": source_url + f"&record={record}"}]},
     ]
     return {"schema": "2.0", "config": {"width_mode": "default"},
-            "header": {"title": {"tag": "plain_text", "content": "美工任务上新"}, "template": "purple"},
+            "header": {"title": {"tag": "plain_text", "content": title}, "template": "purple"},
             "body": {"direction": "vertical", "vertical_spacing": "12px", "elements": elements}}
 
 
@@ -118,6 +124,59 @@ def send_new_task(record_id, mapping, feishu):
     if not recipients:
         logger.debug("新增通知跳过：未启用接收人")
         return True
+    return deliver(record_id, mapping, feishu, recipients, "new_task")
+
+
+def alert_open_id(source_id, feishu, bot):
+    """功能说明：解析通知应用下的人员身份。参数 source_id：数据应用 Open ID；feishu：数据客户端；bot：通知客户端。返回值：通知应用 Open ID。"""
+    if feishu.settings.app_id == bot.settings.app_id:
+        uid = source_id
+    else:
+        union_id = feishu.get_contact_user(source_id).get("union_id")
+        if not isinstance(union_id, str) or not union_id.startswith("on_"):
+            raise ValueError("人员 Union ID 不可用")
+        uid = bot.get_contact_user_by_union_id(union_id).get("open_id", "")
+    if not isinstance(uid, str) or not re.fullmatch(r"ou_[A-Za-z0-9]{1,125}", uid):
+        raise ValueError("通知应用 Open ID 不可用")
+    return uid
+
+
+def confirmation(record_id, event, mapping, feishu):
+    """功能说明：校验确认状态并发送通知，不修改任务或调用 AI。参数 record_id：需求 ID；event：确认事件；mapping：字段映射；feishu：数据客户端。返回值：sent_or_duplicate、skipped 或 disabled；发送失败抛出异常。"""
+    if event not in {"leader_confirmed", "assignee_confirmed"}:
+        raise ValueError("不支持的通知事件")
+    settings = feishu.settings
+    config = load_notifications(settings.fields_path.parent / "notifications.toml", event)
+    if not config:
+        return "disabled"
+    fields = feishu.get_record(record_id)
+    owners = fields.get(mapping["assignee"]) or []
+    if not owners or fields.get(mapping[event]) not in (True, 1) or fields.get(mapping["cancelled"]) in (True, 1) or fields.get(mapping["completed_at"]):
+        return "skipped"
+    source_key = config.get("recipient_field")
+    if source_key not in {"assignee", "creator"}:
+        raise ValueError("确认通知 recipient_field 需为 assignee 或 creator")
+    source = fields.get(mapping[source_key]) or []
+    if isinstance(source, dict):
+        source = [source]
+    if not source:
+        raise ValueError("通知接收人为空")
+    bot = FeishuClient(replace(settings, app_id=settings.alert_app_id, app_secret=settings.alert_app_secret))
+    recipients = []
+    for person in source:
+        uid = alert_open_id(person["id"], feishu, bot)
+        if uid not in {p["open_id"] for p in recipients}:
+            recipients.append({"open_id": uid, "name": person.get("name") or "记录人员"})
+    # 负责人发生变化时按新的分配通知；重复触发同一分配不会重复发送。
+    version = json.dumps([p["id"] for p in owners])
+    if not deliver(record_id, mapping, feishu, recipients, event, fields, version):
+        raise RuntimeError("部分确认通知发送失败，可重试同一请求")
+    return "sent_or_duplicate"
+
+
+def deliver(record_id, mapping, feishu, recipients, event, fields=None, version=""):
+    """功能说明：按接收人持久化去重并发送卡片。参数 record_id：记录 ID；mapping：字段映射；feishu：数据客户端；recipients：接收人；event：事件；fields：可选记录快照；version：分配版本。返回值：是否全部成功。"""
+    settings = feishu.settings
     if not settings.alert_app_id or not settings.alert_app_secret:
         raise ValueError("请配置 FEISHU_ALERT_APP_ID 和 FEISHU_ALERT_APP_SECRET")
     bot = FeishuClient(replace(settings, app_id=settings.alert_app_id, app_secret=settings.alert_app_secret))
@@ -127,7 +186,9 @@ def send_new_task(record_id, mapping, feishu):
     content = None
     for person in recipients:
         # 按应用、表、记录和接收人去重；锁覆盖发送与落盘，供后台和 CLI 共用。
-        identity = [settings.alert_app_id, settings.base_token, settings.table_id, record_id, person["open_id"], "new_task"]
+        identity = [settings.alert_app_id, settings.base_token, settings.table_id, record_id, person["open_id"], event]
+        if version:
+            identity.append(version)
         key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
         path = folder / f"{key}.json"
         try:
@@ -142,13 +203,13 @@ def send_new_task(record_id, mapping, feishu):
                     raise ValueError("通知发送结果未知且已超过一小时，请核对聊天记录与通知缓存")
                 if not state:
                     if content is None:
-                        fields = feishu.get_record(record_id)
-                        content = notification_content(record_id, fields, mapping, settings, feishu)
+                        snapshot = fields if fields is not None else feishu.get_record(record_id)
+                        content = notification_content(record_id, snapshot, mapping, settings, feishu, event)
                     state = {"sent": False, "started_at": time.time(), "content": content}
                     save_state(path, state)
                 message_id = bot.send_card(person["open_id"], state["content"], key[:50])
                 save_state(path, {"sent": True, "message_id": message_id})
-                logger.info("新增通知已发送 接收人=%s", person["name"])
+                logger.info("通知已发送 事件=%s 接收人=%s", event, person["name"])
         except Exception as exc:
             success = False
             logger.warning("新增通知失败 接收人=%s 原因=%s", person["name"], str(exc))

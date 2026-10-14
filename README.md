@@ -236,4 +236,25 @@ docker exec design-task-dispatch /app/.venv/bin/python -m app.cli retry <记录I
 docker compose exec design-task-dispatch .venv/bin/python -m app.cli notify recXXXXXXXX
 ```
 
-上线时同步 `config/notifications.toml` 与通知应用环境变量，再重建容器。缺少 TOML 文件或没有启用的接收人时跳过发送。新增需求自动化保留 HTTP 触发步骤，关闭原来的直接发送消息步骤，避免提前或重复通知。最终负责人、组长确认等通知仍由多维表自动化管理；本次程序入口只负责新增需求通知。
+上线时同步 `config/notifications.toml` 与通知应用环境变量，再重建容器。缺少 TOML 文件或没有启用的接收人时跳过发送。新增需求自动化保留 HTTP 触发步骤，关闭原来的直接发送消息步骤，避免提前或重复通知。最终负责人、组长确认等通知由多维表自动化调用确认通知 HTTP 接口。
+
+## 确认通知 HTTP 接口
+
+多维表自动化以 `POST /webhook/notify` 调用程序，Headers 为 `Content-Type: application/json` 和 `X-Webhook-Token: <与新增需求相同的鉴权值>`，Params 留空。JSON 请求体包含 `record_id`（插入触发记录的记录 ID）和 `event`。
+
+| event | 自动化触发条件 | 接收人 | 卡片 |
+|---|---|---|---|
+| `leader_confirmed` | 组长确认勾选，最终负责人不为空 | 最终负责人中的所有人 | 美工任务上新 · 已分配：任务名称、需求说明、所属平台、需求人员、最终负责人 |
+| `assignee_confirmed` | 负责人确认勾选，最终负责人不为空 | 创建人 | 美工任务 · 负责人已接收确认：任务名称、最终负责人 |
+
+两种通知均为紫色卡片，提供查看需求按钮。TOML 中对应事件的 `enabled` 控制启用；`recipient_field` 引用字段映射键，分别为 `assignee`、`creator`。动态人员 Open ID 通过 Union ID 转换为通知应用下的身份，解析失败时返回 503，不发送给其他人。
+
+接口同步读取最新记录、校验状态并发送，不调用 AI 或修改任务。已取消、已完成或不满足确认条件返回 `skipped`；配置关闭返回 `disabled`；全部成功或已发送返回 `sent_or_duplicate`。业务失败返回 503，可重试相同请求，成功接收人不重复发送。每种事件按记录、最终负责人列表及接收人持久化去重；调整最终负责人后可重新通知，同一负责人组合取消勾选再勾选不会重复通知。调用超时也可重试同一请求。
+
+```json
+{"event":"leader_confirmed","record_id":"recXXXXXXXX"}
+```
+
+```json
+{"event":"assignee_confirmed","record_id":"recXXXXXXXX"}
+```

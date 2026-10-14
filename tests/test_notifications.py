@@ -155,3 +155,38 @@ def test_same_app_card_uses_original_open_id(client):
     card = notification_content('recTest', fields, MAPPING, settings, client)
     assert '<at id="ou_primary"></at>' in card['body']['elements'][0]['content']
     client.get_contact_user.assert_not_called()
+
+
+@pytest.mark.parametrize('event,expected', [('leader_confirmed', ['ou_first', 'ou_second']),
+                                         ('assignee_confirmed', ['ou_creator'])])
+def test_confirmation_recipients_and_event_dedup(client, monkeypatch, event, expected):
+    from app.notifications import confirmation
+    client.settings = replace(client.settings, alert_app_id=client.settings.app_id)
+    mapping = MAPPING | {k: k for k in ['assignee', 'creator', 'leader_confirmed', 'assignee_confirmed', 'cancelled', 'completed_at']}
+    path = client.settings.fields_path.parent / 'notifications.toml'
+    path.write_text(path.read_text() + '\n[leader_confirmed]\nenabled=true\nrecipient_field="assignee"\n[assignee_confirmed]\nenabled=true\nrecipient_field="creator"\n')
+    fields = client.get_record.return_value
+    fields.update({'assignee': [{'id': 'ou_first', 'name': '甲'}, {'id': 'ou_second', 'name': '乙'}],
+                   'creator': {'id': 'ou_creator', 'name': '创建人'},
+                   'submitter': [{'id': 'ou_other', 'name': '需求人'}],
+                   'leader_confirmed': True, 'assignee_confirmed': True})
+    fields.pop('rule_explanation')
+    fields.pop('recommendation_result')
+    send = Mock(return_value='om_ok')
+    monkeypatch.setattr(FeishuClient, 'send_card', send)
+    assert confirmation('recConfirm', event, mapping, client) == 'sent_or_duplicate'
+    assert confirmation('recConfirm', event, mapping, client) == 'sent_or_duplicate'
+    assert [c.args[0] for c in send.call_args_list] == expected
+    card = send.call_args.args[1]
+    assert len(card['body']['elements']) == 2
+    assert '最终负责人' in card['body']['elements'][0]['content']
+    assert '推荐负责人' not in card['body']['elements'][0]['content']
+    fields[event] = False
+    assert confirmation('recConfirm', event, mapping, client) == 'skipped'
+    fields[event] = True
+    fields['assignee'] = [{'id': 'ou_third', 'name': '丙'}]
+    assert confirmation('recConfirm', event, mapping, client) == 'sent_or_duplicate'
+    assert send.call_count == len(expected) + 1
+    fields['cancelled'] = True
+    assert confirmation('recConfirm', event, mapping, client) == 'skipped'
+    client.update_record.assert_not_called()
