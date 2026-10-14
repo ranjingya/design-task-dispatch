@@ -14,14 +14,14 @@ from app.feishu import FeishuClient
 from app.materials import collect_materials
 from app.rules import normalize_rules, select_department, format_result
 
-MAPPING = {"creator": "创建人", "title": "标题", "description": "说明", "attachments": "材料", "platform": "平台",
+MAPPING = {"submitter": "需求人", "creator": "创建人", "title": "标题", "description": "说明", "attachments": "材料", "platform": "平台",
            "department": "部门", "load_score": "分数", "work_type": "类别", "level": "等级", "rule_explanation": "结果"}
 RULES = [{"record_id": "recRule", "work_type": "测试类型", "content": "测试工作", "departments": ["测试部"],
           "default_level": "A", "adjustment": "", "assignment": "轮流", "load_score": 2}]
 RAW_RULES = [{"record_id": "recRule", "fields": {"工作类型": "测试类型", "包含的工作": "测试工作",
               "适用部门": "测试部", "默认ABC分类": "A基础重复", "分类调整说明": "", "推荐方式": "轮流", "人员负载分数": 2}}]
 OPTIONS = ["测试类型"]
-SCHEMA = [{"field_name": "创建人", "type": 1003}, {"field_name": "部门", "type": 3}, {"field_name": "平台", "type": 1},
+SCHEMA = [{"field_name": "需求人", "type": 11}, {"field_name": "创建人", "type": 1003}, {"field_name": "部门", "type": 3}, {"field_name": "平台", "type": 1},
           {"field_name": "分数", "type": 2}, {"field_name": "类别", "type": 3, "property": {"options": [{"name": x} for x in OPTIONS]}},
           {"field_name": "等级", "type": 3, "property": {"options": [{"name": x} for x in "ABC"]}},
           {"field_name": "结果", "type": 1}, {"field_name": "材料", "type": 17, "field_id": "fldImage"}]
@@ -47,7 +47,7 @@ def feishu(settings):
     client.get_contact_department.return_value = {"name": "测试部", "parent_department_id": "0"}
     client.get_fields.return_value = SCHEMA
     client.get_rules.return_value = RAW_RULES
-    client.get_record.return_value = {"创建人": {"id": "creator"}, "标题": "测试", "说明": "测试需求", "平台": "示例平台", "部门": "测试部"}
+    client.get_record.return_value = {"需求人": [{"id": "manual"}], "创建人": {"id": "creator"}, "标题": "测试", "说明": "测试需求", "平台": "示例平台", "部门": "测试部"}
     return client
 
 
@@ -452,3 +452,31 @@ def test_unknown_creator_clears_old_results_without_ai_or_materials(feishu, monk
     assert updates['结果'] == '创建人员部门未知'
     assert all(updates[key] is None for key in ['部门', '类别', '等级', '分数'])
     assert updates['推荐人'] == []
+
+
+def test_submitter_initialized_before_ai_and_preserved_on_rerun(feishu, monkeypatch):
+    """首次复制人员ID，重跑保留人工需求人，部门仍跟随创建人。"""
+    feishu.get_record.return_value.pop('需求人')
+    def classify(*args, **kwargs):
+        assert feishu.update_record.call_args_list[0].args[1] == {'需求人': [{'id': 'creator'}]}
+        return RATED
+    monkeypatch.setattr(AIClient, 'classify', classify)
+    process_record('recTest', MAPPING, feishu)
+    assert feishu.update_record.call_count == 2
+    assert all('创建人' not in call.args[1] for call in feishu.update_record.call_args_list)
+    feishu.get_record.return_value['需求人'] = [{'id': 'manual'}]
+    feishu.reset_mock()
+    monkeypatch.setattr(AIClient, 'classify', Mock(return_value=RATED))
+    process_record('recTest', MAPPING, feishu)
+    feishu.update_record.assert_called_once()
+    assert '需求人' not in feishu.update_record.call_args.args[1]
+    feishu.get_contact_user.assert_called_once_with('creator')
+
+
+def test_submitter_initialization_survives_model_failure(feishu, monkeypatch):
+    feishu.get_record.return_value.pop('需求人')
+    monkeypatch.setattr(AIClient, 'classify', Mock(side_effect=RuntimeError('模型失败')))
+    with pytest.raises(RuntimeError):
+        process_record('recTest', MAPPING, feishu)
+    assert feishu.update_record.call_args_list[0].args[1] == {'需求人': [{'id': 'creator'}]}
+    assert '需求人' not in feishu.update_record.call_args.args[1]

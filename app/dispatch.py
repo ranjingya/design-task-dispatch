@@ -18,6 +18,23 @@ from app.recommendation import protected, recommend, save_rotation, format_recom
 logger = logging.getLogger(__name__)
 
 
+def initialize_submitter(record_id: str, fields: dict, mapping: dict[str, str], feishu: FeishuClient) -> None:
+    """功能说明：需求人为空时复制创建人。参数 record_id：记录ID；fields：当前记录及初始化后快照；mapping：字段映射；feishu：飞书客户端。返回值：无。"""
+    target = mapping["submitter"]
+    if fields.get(target):
+        logger.info("保留已填写的需求人：record_id=%s", record_id)
+        return
+    creator = fields.get(mapping["creator"])
+    people = creator if isinstance(creator, list) else [creator]
+    if len(people) != 1 or not isinstance(people[0], dict) or not people[0].get("id"):
+        logger.warning("需求人初始化跳过：创建人缺失，record_id=%s", record_id)
+        return
+    value = [{"id": people[0]["id"]}]
+    feishu.update_record(record_id, {target: value})
+    fields[target] = value
+    logger.info("已从创建人初始化需求人：record_id=%s", record_id)
+
+
 def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient) -> None:
     """功能说明：读取需求、调用 AI 评级、按规则推荐人员并回写结果。参数 record_id：记录 ID；mapping：本次字段快照；feishu：飞书客户端。返回值：无。"""
     schema = {item["field_name"]: item for item in feishu.get_fields()}
@@ -36,16 +53,19 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
         raise ValueError("部门需为单选，平台需为文本，请核对字段映射")
     if schema.get(mapping.get("creator"), {}).get("type") != 1003:
         raise ValueError("创建人映射需指向创建人字段")
+    if schema.get(mapping.get("submitter"), {}).get("type") != 11:
+        raise ValueError("需求人映射需指向人员字段")
     recommending = "recommendation_result" in mapping
     if recommending and (schema.get(mapping['recommendation_result'], {}).get('type') != 1 or
                          schema.get(mapping['recommended_assignee'], {}).get('type') != 11):
         raise ValueError("推荐结果需为文本，系统推荐人需为人员字段")
     try:
-        feishu.settings.validate_ai()
         fields = feishu.get_record(record_id)
         if recommending and protected(fields, mapping):
             logger.info("保留人工安排或已结束任务：record_id=%s", record_id)
             return
+        initialize_submitter(record_id, fields, mapping, feishu)
+        feishu.settings.validate_ai()
         demand = {key: fields.get(mapping[key]) for key in
                   ("title", "description", "department", "platform", "deadline", "notes") if key in mapping}
         rules = load_daily_rules(feishu)
