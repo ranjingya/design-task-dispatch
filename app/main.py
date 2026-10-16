@@ -12,6 +12,7 @@ from app.notifications import confirmation
 from app.feishu import FeishuClient
 from app.dispatch import Dispatcher
 from app.task_logging import configure_logging
+from app.statistics import StatisticsSynchronizer
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,11 @@ def create_app(settings: Settings | None = None, dispatcher=None) -> Flask:
     app.extensions["dispatcher"] = dispatcher
     if owned:
         atexit.register(dispatcher.close)
+        if settings.statistics_table_id:
+            statistics = StatisticsSynchronizer(settings)
+            statistics.thread.start()
+            app.extensions['statistics'] = statistics
+            atexit.register(statistics.close)
 
     @app.get("/health")
     def health():

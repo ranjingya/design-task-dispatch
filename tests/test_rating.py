@@ -99,6 +99,15 @@ def test_invalid_schema_never_writes(feishu):
     feishu.update_record.assert_not_called()
 
 
+def test_child_never_initializes_rates_or_writes(feishu, monkeypatch):
+    classify = Mock()
+    monkeypatch.setattr(AIClient, 'classify', classify)
+    feishu.get_record.return_value = {'父记录': [{'record_ids': ['recParent']}], '标题': '人工执行'}
+    process_record('recChild', MAPPING | {'parent_record': '父记录'}, feishu)
+    classify.assert_not_called()
+    feishu.update_record.assert_not_called()
+
+
 @pytest.mark.parametrize("change", [
     {"work_type": "C-不存在"}, {"rule_id": "recFake"}, {"level": "B"},
     {"missing_information": ["缺信息"]}, {"reason": ""}, {"matched": False},

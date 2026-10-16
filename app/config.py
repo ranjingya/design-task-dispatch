@@ -41,6 +41,7 @@ class Settings:
     max_total_image_bytes: int = 20 * 1024 * 1024
     alert_app_id: str = ""
     alert_app_secret: str = field(default="", repr=False)
+    statistics_table_id: str = ""
 
     @classmethod
     def from_env(cls):
@@ -76,6 +77,7 @@ class Settings:
             max_total_image_bytes=int(os.getenv("MAX_TOTAL_IMAGE_BYTES", str(20 * 1024 * 1024))),
             alert_app_id=os.getenv("FEISHU_ALERT_APP_ID", "").strip(),
             alert_app_secret=os.getenv("FEISHU_ALERT_APP_SECRET", "").strip(),
+            statistics_table_id=os.getenv("FEISHU_STATISTICS_TABLE_ID", "").strip(),
         )
 
     def validate_ai(self) -> None:
