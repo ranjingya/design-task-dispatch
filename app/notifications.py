@@ -14,7 +14,6 @@ from urllib.parse import quote
 
 from app.feishu import FeishuClient
 from app.rules import plain
-from app.task_records import parent_ids
 
 logger = logging.getLogger(__name__)
 
@@ -151,8 +150,6 @@ def confirmation(record_id, event, mapping, feishu):
     if not config:
         return "disabled"
     fields = feishu.get_record(record_id)
-    if parent_ids(fields, mapping):
-        return "skipped"
     owners = fields.get(mapping["assignee"]) or []
     if not owners or fields.get(mapping[event]) not in (True, 1) or fields.get(mapping["cancelled"]) in (True, 1) or fields.get(mapping["completed_at"]):
         return "skipped"
@@ -207,9 +204,6 @@ def deliver(record_id, mapping, feishu, recipients, event, fields=None, version=
                 if not state:
                     if content is None:
                         snapshot = fields if fields is not None else feishu.get_record(record_id)
-                        if parent_ids(snapshot, mapping):
-                            logger.debug("通知跳过：人工执行子记录 record=%s", record_id)
-                            return True
                         content = notification_content(record_id, snapshot, mapping, settings, feishu, event)
                     state = {"sent": False, "started_at": time.time(), "content": content}
                     save_state(path, state)

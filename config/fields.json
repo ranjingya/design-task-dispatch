@@ -19,6 +19,5 @@
   "recommendation_result": "推荐结果",
   "cancelled": "是否取消",
   "document_link": "需求文档链接",
-  "creator": "创建人",
-  "parent_record": "父记录"
+  "creator": "创建人"
 }

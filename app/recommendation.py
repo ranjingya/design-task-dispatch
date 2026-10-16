@@ -8,7 +8,6 @@ from pathlib import Path
 from app.rules import load_score, plain
 from app.shop_matching import resolve_shop
 from app.task_logging import task_details
-from app.task_records import task_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -33,10 +32,9 @@ def protected(fields, mapping):
 def workloads(records, mapping, members, exclude_id):
     """功能说明：计算未结束任务的当前负载。参数 records：完整任务；mapping：字段映射；members：人员 ID 集合；exclude_id：排除本次任务。返回值：各人分数、任务数及缺分记录。"""
     loads = {uid: {'score': 0, 'count': 0, 'missing': []} for uid in members}
-    _, executions = task_snapshot(records, mapping, exclude_id)
-    for record in executions:
+    for record in records:
         f = record['fields']
-        if checked(f.get(mapping['cancelled'])) or f.get(mapping['completed_at']):
+        if record['record_id'] == exclude_id or checked(f.get(mapping['cancelled'])) or f.get(mapping['completed_at']):
             continue
         key = 'assignee' if checked(f.get(mapping['leader_confirmed'])) else 'recommended_assignee'
         for uid in set(user_ids(f.get(mapping[key]))):

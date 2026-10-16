@@ -152,21 +152,9 @@ class FeishuClient:
         logger.debug("业务记录加载完成：table_id=%s count=%d", table_id, len(records))
         return records
 
-    def get_fields(self, table_id: str | None = None) -> list[dict]:
+    def get_fields(self) -> list[dict]:
         """读取需求表字段结构及单选选项。"""
-        return self._list_all(table_id or self.settings.table_id, "fields")
-
-    def mutate_statistics(self, operation: str, rows: list) -> None:
-        """功能说明：分批维护专用统计表。参数 operation：batch_create、batch_update 或 batch_delete；rows：本批字段、记录或 ID。返回值：无；需求表禁止作为目标。"""
-        table = self.settings.statistics_table_id
-        if not table or table == self.settings.table_id or operation not in {'batch_create', 'batch_update', 'batch_delete'}:
-            raise ValueError('统计表目标或操作无效')
-        path = f'/bitable/v1/apps/{quote(self.settings.base_token, safe="")}/tables/{quote(table, safe="")}/records/{operation}'
-        for offset in range(0, len(rows), 200):
-            batch = rows[offset:offset + 200]
-            payload = {'records': batch}
-            self._request('POST', path, json=payload,
-                          headers={'Authorization': f'Bearer {self._access_token()}'})
+        return self._list_all(self.settings.table_id, "fields")
 
     def get_rules(self) -> list[dict]:
         """读取规则表全部记录，保留真实规则 ID 和字段内容。"""

@@ -17,7 +17,6 @@ from app.notifications import send_new_task
 from app.recommendation import protected, recommend, save_rotation, format_recommendation
 
 from app.task_logging import task_context, task_details
-from app.task_records import parent_ids
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +66,6 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
     try:
         task_details(stage="读取记录")
         fields = feishu.get_record(record_id)
-        if parent_ids(fields, mapping):
-            task_details(outcome="跳过：人工执行子记录")
-            return
         if recommending and protected(fields, mapping):
             task_details(outcome="跳过：已有人工安排或任务已结束")
             return

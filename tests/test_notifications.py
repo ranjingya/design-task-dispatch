@@ -157,19 +157,6 @@ def test_same_app_card_uses_original_open_id(client):
     client.get_contact_user.assert_not_called()
 
 
-def test_child_confirmation_and_new_notification_never_send(client, monkeypatch):
-    from app.notifications import confirmation
-    mapping = MAPPING | {'parent_record': '父记录'}
-    client.get_record.return_value['父记录'] = [{'record_ids': ['recParent']}]
-    path = client.settings.fields_path.parent / 'notifications.toml'
-    path.write_text(path.read_text() + '\n[leader_confirmed]\nenabled=true\nrecipient_field="assignee"\n')
-    send = Mock()
-    monkeypatch.setattr(FeishuClient, 'send_card', send)
-    assert send_new_task('recChild', mapping, client)
-    assert confirmation('recChild', 'leader_confirmed', mapping, client) == 'skipped'
-    send.assert_not_called()
-
-
 @pytest.mark.parametrize('event,expected', [('leader_confirmed', ['ou_first', 'ou_second']),
                                          ('assignee_confirmed', ['ou_creator'])])
 def test_confirmation_recipients_and_event_dedup(client, monkeypatch, event, expected):
