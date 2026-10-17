@@ -216,7 +216,16 @@ docker exec design-task-dispatch /app/.venv/bin/python -m app.cli retry <记录I
 
 应用日志同时写入控制台和 `logs/app.log`，单文件上限 10 MiB，保留 5 份备份，UTF-8 编码；任务空行分隔与异常堆栈保留。`LOG_DIR` 指定目录，Compose 将宿主机 `./logs` 挂载到 `/app/logs`。应用日志及 Gunicorn 工作进程错误访问、错误日志进入该文件，Gunicorn 主进程启动日志通过 `docker logs` 查看。
 
-容器使用 UID/GID `10001:10001`。CD 在启动前将日志目录归属设置为该用户，目录权限为 `0750`；当前日志文件为 `0640`。手动部署需先创建宿主机日志目录并执行 `sudo chown -R 10001:10001 logs && sudo chmod 0750 logs`，再启动服务。
+容器使用 UID/GID `10001:10001`。日志目录及文件的属主为容器用户 `10001`，属组为宿主机部署用户的主组。目录权限为 `2750`，文件权限为 `0640`；容器用户负责写入，部署用户可以列出和读取日志。目录的组继承权限使轮转后新建的日志沿用相同属组。CD 在每次部署前设置这些权限。
+
+手动部署时，在宿主机项目目录执行以下命令，再启动服务：
+
+```bash
+mkdir -p logs
+sudo chown -R "10001:$(id -g)" logs
+sudo find logs -type d -exec chmod 2750 {} +
+sudo find logs -type f -exec chmod 0640 {} +
+```
 
 主、副负责人共用任务推荐名单。未确认任务按每位系统推荐人各计入完整任务分数；组长确认后，按最终负责人名单计入负载。
 
