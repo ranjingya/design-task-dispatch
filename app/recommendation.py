@@ -30,7 +30,7 @@ def protected(fields, mapping):
 
 
 def workloads(records, mapping, members, exclude_id):
-    """功能说明：计算未结束任务的当前负载。参数 records：完整任务；mapping：字段映射；members：人员 ID 集合；exclude_id：排除本次任务。返回值：各人分数、任务数及缺分记录。"""
+    """功能说明：汇总未结束任务的有效负载分，缺分仅记入待计分列表。参数 records：完整任务；mapping：字段映射；members：人员 ID 集合；exclude_id：排除本次任务。返回值：各人有效分数、实际任务数及缺分记录。"""
     loads = {uid: {'score': 0, 'count': 0, 'missing': []} for uid in members}
     for record in records:
         f = record['fields']
@@ -154,8 +154,10 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
         raise ValueError('成员负荷表与推荐人员配置不一致')
     loads = workloads(feishu.get_records(feishu.settings.table_id), mapping, current, record_id)
     def describe(candidates):
-        return ' ｜ '.join(f"{n} " + ('缺分' if loads[names[n]]['missing'] else
-                                      f"{loads[names[n]]['score']:g}") for n in candidates)
+        """展示已计入的负载分，并标明暂未计分的任务数。"""
+        return ' ｜ '.join(f"{n} {loads[names[n]]['score']:g}" +
+                          (f"（{len(loads[names[n]]['missing'])} 条待计分）" if loads[names[n]]['missing'] else '')
+                          for n in candidates)
 
     method = rule.get('assignment', '')
     candidates = list(config['rotation'])
@@ -228,17 +230,12 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
     if not candidates:
         return answer('没有可推荐成员，需人工分配', people='暂无候选人员')
     missing = [n for n in candidates if loads[names[n]]['missing']]
-    available = [n for n in candidates if n not in missing]
     if missing:
         sources = '；'.join(f"{n}={','.join(loads[names[n]]['missing'])}" for n in missing)
-        logger.warning('候选负载缺分 跳过=%s 来源=%s', '、'.join(missing), sources)
-    if not available:
-        return answer('全部候选人员均有任务缺分，请补充分数后重试')
-    if missing:
-        source += f"；{'、'.join(missing)}任务缺分，暂不参与比较"
+        logger.warning('负载统计忽略缺分任务 人员=%s 来源=%s', '、'.join(missing), sources)
     # 同分按既定顺序轮换；当前记录的预占已从比较中排除。
-    minimum = min(loads[names[n]]['score'] for n in available)
-    tied = [n for n in config['rotation'] if n in available and loads[names[n]]['score'] == minimum]
+    minimum = min(loads[names[n]]['score'] for n in candidates)
+    tied = [n for n in config['rotation'] if n in candidates and loads[names[n]]['score'] == minimum]
     state_path = feishu.settings.rules_cache_path.parent / 'rotation.json'
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
     pool = '|'.join(sorted(names[n] for n in candidates))
