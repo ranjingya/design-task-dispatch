@@ -227,11 +227,18 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
 
     if not candidates:
         return answer('没有可推荐成员，需人工分配', people='暂无候选人员')
-    if any(loads[names[n]]['missing'] for n in candidates):
-        return answer('候选人员存在任务缺分，暂时无法比较负载')
+    missing = [n for n in candidates if loads[names[n]]['missing']]
+    available = [n for n in candidates if n not in missing]
+    if missing:
+        sources = '；'.join(f"{n}={','.join(loads[names[n]]['missing'])}" for n in missing)
+        logger.warning('候选负载缺分 跳过=%s 来源=%s', '、'.join(missing), sources)
+    if not available:
+        return answer('全部候选人员均有任务缺分，请补充分数后重试')
+    if missing:
+        source += f"；{'、'.join(missing)}任务缺分，暂不参与比较"
     # 同分按既定顺序轮换；当前记录的预占已从比较中排除。
-    minimum = min(loads[names[n]]['score'] for n in candidates)
-    tied = [n for n in config['rotation'] if n in candidates and loads[names[n]]['score'] == minimum]
+    minimum = min(loads[names[n]]['score'] for n in available)
+    tied = [n for n in config['rotation'] if n in available and loads[names[n]]['score'] == minimum]
     state_path = feishu.settings.rules_cache_path.parent / 'rotation.json'
     state = json.loads(state_path.read_text()) if state_path.exists() else {}
     pool = '|'.join(sorted(names[n] for n in candidates))

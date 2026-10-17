@@ -94,9 +94,61 @@ def test_minimum_load_fixed_pool_and_missing_score(client):
     assert run(client)[0]['推荐人'] == [{'id': 'b'}]
     assert run(client, '固定人员（甲）')[0]['推荐人'] == [{'id': 'a'}]
     client.data['tasks'].append(row('missing', 推荐人=[{'id': 'b'}]))
-    assert run(client)[0]['推荐人'] == []
+    assert run(client)[0]['推荐人'] == [{'id': 'a'}]
     assert '缺分' in run(client)[0]['说明']
+    assert run(client, '固定人员（乙）')[0]['推荐人'] == []
     assert run(client, '固定人员（未知）')[0]['推荐人'] == []
+
+
+@pytest.mark.parametrize('score', [None, -1, '无效', float('nan')])
+def test_confirmed_missing_score_only_excludes_its_assignee(client, score, caplog):
+    """已确认任务缺分时，只跳过该负责人，其他候选仍可正常分配。"""
+    client.data['tasks'] = [row('unknown', 负责人=[{'id': 'a'}], 确认=True, 分数=score),
+                            row('known', 负责人=[{'id': 'b'}], 确认=True, 分数=6)]
+    updates, pending = run(client)
+    assert updates['推荐人'] == [{'id': 'b'}]
+    assert updates['说明'].split('\n\n')[2] == '甲 缺分 ｜ 乙 6'
+    assert '甲任务缺分，暂不参与比较' in updates['说明']
+    assert pending is not None
+    assert '甲=unknown' in caplog.text
+
+
+def test_unassigned_missing_tasks_do_not_reserve_any_person(client):
+    """没有最终负责人或推荐人的缺分任务不影响人员负载。"""
+    client.data['tasks'] = [row('unassigned'), row('unassigned-confirmed', 确认=True)]
+    updates, _ = run(client)
+    assert updates['推荐人'] == [{'id': 'a'}]
+    assert updates['说明'].split('\n\n')[2] == '甲 0 ｜ 乙 0'
+
+
+def test_all_candidates_missing_score_requires_manual_assignment(client):
+    """所有候选均无法确定负载时，保留人工分配并停止推进轮换。"""
+    client.data['tasks'] = [row('unknown', 推荐人=[{'id': 'a'}, {'id': 'b'}])]
+    updates, pending = run(client)
+    assert updates['推荐人'] == [] and pending is None
+    assert updates['说明'].split('\n\n') == [
+        '人工分配', '全部候选人员均有任务缺分，请补充分数后重试',
+        '甲 缺分 ｜ 乙 缺分', '本任务 4 分']
+
+
+def test_missing_person_rejoins_comparison_after_score_is_supplied(client):
+    """补充分数后，该人员自动重新参与最低负载和同分轮换比较。"""
+    client.data['tasks'] = [row('unknown', 推荐人=[{'id': 'a'}]),
+                            row('known', 推荐人=[{'id': 'b'}], 分数=6)]
+    updates, pending = run(client)
+    assert updates['推荐人'] == [{'id': 'b'}]
+    save_rotation(pending)
+    client.data['tasks'][0]['fields']['分数'] = 0
+    assert run(client)[0]['推荐人'] == [{'id': 'a'}]
+
+
+def test_fixed_owner_still_applies_when_its_load_is_unknown(client):
+    """按商品归属直接指定的人员保持归属关系，说明中展示缺分提示。"""
+    client.data['products'] = [row('p', 商品='XX12345', 认领='甲')]
+    client.data['tasks'] = [row('unknown', 推荐人=[{'id': 'a'}])]
+    updates, pending = run(client, '找对应人员', 'product', {'title': 'XX12345'})
+    assert updates['推荐人'] == [{'id': 'a'}] and pending is None
+    assert updates['说明'].split('\n\n')[2] == '甲 缺分'
 
 
 def test_manual_unconfigured_and_excluded_owner(client):
@@ -266,7 +318,9 @@ def test_missing_score_display(client):
     updates, _ = recommend('self', {}, {}, None, M, client)
     assert updates['说明'].split('\n\n') == ['人工分配', '未准确匹配规则，暂时无法推荐', '人员负载未比较', '本任务分数待确定']
     client.data['tasks'] = [row('missing', 推荐人=[{'id': 'a'}])]
-    assert run(client)[0]['说明'].split('\n\n') == ['人工分配', '候选人员存在任务缺分，暂时无法比较负载', '甲 缺分 ｜ 乙 0', '本任务 4 分']
+    assert run(client)[0]['说明'].split('\n\n') == [
+        '轮流', '全体美工负载最低优先，同分轮流；甲任务缺分，暂不参与比较',
+        '甲 缺分 ｜ 乙 0', '本任务 4 分']
 
 
 def test_sequential_recommendations_reserve_load_and_rotate(client):
