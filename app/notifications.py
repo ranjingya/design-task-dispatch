@@ -56,7 +56,7 @@ def escape_text(value):
 
 
 def notification_content(record_id, fields, mapping, settings, feishu, event="new_task"):
-    """功能说明：按上新样式生成紫色卡片。参数 record_id：记录 ID；fields：回写后字段；mapping：字段映射；settings：数据配置；feishu：人员身份查询客户端；event：通知事件。返回值：飞书 Card 2.0 内容。"""
+    """功能说明：按通知事件生成卡片内容和标题颜色。参数 record_id：记录 ID；fields：回写后字段；mapping：字段映射；settings：数据配置；feishu：人员身份查询客户端；event：通知事件。返回值：飞书 Card 2.0 内容。"""
     def value(key):
         return fields.get(mapping.get(key))
 
@@ -123,7 +123,8 @@ def notification_content(record_id, fields, mapping, settings, feishu, event="ne
          "behaviors": [{"type": "open_url", "default_url": source_url + f"&record={record}"}]},
     ]
     return {"schema": "2.0", "config": {"width_mode": "default"},
-            "header": {"title": {"tag": "plain_text", "content": title}, "template": "purple"},
+            "header": {"title": {"tag": "plain_text", "content": title},
+                       "template": "red" if event == "deadline_reminder" else "purple"},
             "body": {"direction": "vertical", "vertical_spacing": "12px", "elements": elements}}
 
 

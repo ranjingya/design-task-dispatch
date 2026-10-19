@@ -225,7 +225,7 @@ def test_deadline_sends_to_all_current_owners_once(deadline_client, monkeypatch)
     assert [call.args[0] for call in send.call_args_list] == ['ou_first', 'ou_second']
     card = send.call_args.args[1]
     assert card['header'] == {'title': {'tag': 'plain_text', 'content': '美工任务 · 截止日期提醒'},
-                              'template': 'purple'}
+                              'template': 'red'}
     body = card['body']['elements'][0]['content']
     assert body.startswith('**任务即将到期**\n\n')
     assert '任务名称' in body and '到期需求' in body and '需求人员' in body and '所属平台' in body

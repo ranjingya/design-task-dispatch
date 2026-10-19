@@ -257,7 +257,7 @@ docker compose exec design-task-dispatch .venv/bin/python -m app.cli notify recX
 | `assignee_confirmed` | 负责人确认勾选，最终负责人不为空 | 创建人 | 美工任务 · 负责人已接收确认：任务名称、最终负责人 |
 | `deadline_reminder` | 截止日期当天 09:00，实际完成时间为空 | 最终负责人中的所有人 | 美工任务 · 截止日期提醒：任务即将到期、任务名称、需求人员、所属平台 |
 
-通知均为紫色卡片，提供查看需求按钮。TOML 中对应事件的 `enabled` 控制启用；`recipient_field` 引用字段映射键。组长确认与截止提醒使用 `assignee`，负责人确认使用 `creator`。动态人员 Open ID 通过 Union ID 转换为通知应用下的身份，解析失败时返回 503，不发送给其他人。
+截止提醒使用红色标题背景，其余通知使用紫色标题背景，均提供查看需求按钮。TOML 中对应事件的 `enabled` 控制启用；`recipient_field` 引用字段映射键。组长确认与截止提醒使用 `assignee`，负责人确认使用 `creator`。动态人员 Open ID 通过 Union ID 转换为通知应用下的身份，解析失败时返回 503，不发送给其他人。
 
 接口同步读取最新记录、校验状态并发送，不调用 AI 或修改任务。已取消、已完成、没有最终负责人或不满足事件条件时返回 `skipped`；配置关闭返回 `disabled`；全部成功或已发送返回 `sent_or_duplicate`。业务失败返回 503，可重试相同请求，成功接收人不重复发送。调用超时也可重试同一请求。
 
