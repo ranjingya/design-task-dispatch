@@ -107,16 +107,16 @@ def notification_content(record_id, fields, mapping, settings, feishu, event="ne
                  ("最终负责人", people("assignee"))]
     elif event == "deadline_reminder":
         title = "美工任务 · 截止日期提醒"
+        due = deadline_date(value("deadline"))
         lines = [("任务名称", escape_text(value("title")) or "未命名需求"),
                  ("需求人员", people("submitter") or "未填写"),
-                 ("所属平台", escape_text(value("platform")) or "未填写")]
+                 ("所属平台", escape_text(value("platform")) or "未填写"),
+                 ("截止日期", due.isoformat() if due is not None else "未填写")]
     base = quote(settings.base_token, safe="")
     table = quote(settings.table_id, safe="")
     record = quote(record_id, safe="")
     source_url = f"https://feishu.cn/base/{base}?table={table}"
     text = "\n".join(f"**{label}：** {text}" for label, text in lines)
-    if event == "deadline_reminder":
-        text = "**任务即将到期**\n\n" + text
     elements = [
         {"tag": "markdown", "content": text},
         {"tag": "button", "text": {"tag": "plain_text", "content": "查看需求"}, "type": "default",

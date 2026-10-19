@@ -227,7 +227,10 @@ def test_deadline_sends_to_all_current_owners_once(deadline_client, monkeypatch)
     assert card['header'] == {'title': {'tag': 'plain_text', 'content': '美工任务 · 截止日期提醒'},
                               'template': 'red'}
     body = card['body']['elements'][0]['content']
-    assert body.startswith('**任务即将到期**\n\n')
+    assert body.startswith('**任务名称：** 到期需求')
+    assert body.splitlines()[-1] == '**截止日期：** 2026-10-19'
+    assert len(body.splitlines()) == 4 and '\n\n' not in body
+    assert '任务即将到期' not in body
     assert '任务名称' in body and '到期需求' in body and '需求人员' in body and '所属平台' in body
     assert '<at id="ou_requester"></at>' in body
     assert '推荐负责人' not in body
