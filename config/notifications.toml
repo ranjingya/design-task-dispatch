@@ -26,3 +26,8 @@ recipient_field = "assignee"
 [assignee_confirmed]
 enabled = true
 recipient_field = "creator"
+
+# 截止日期提醒：发送给最终负责人中的所有人。
+[deadline_reminder]
+enabled = true
+recipient_field = "assignee"

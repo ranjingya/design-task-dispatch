@@ -2,14 +2,16 @@
 
 import json
 from dataclasses import replace
+from datetime import datetime
 from unittest.mock import Mock
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
 
 from app.config import Settings
 from app.feishu import FeishuClient
-from app.notifications import load_notifications, notification_content, send_new_task
+from app.notifications import deadline_date, load_notifications, notification_content, notify_record, send_new_task
 
 MAPPING = {key: key for key in ['title', 'description', 'submitter', 'department', 'platform',
                               'recommended_assignee', 'work_type', 'level', 'load_score',
@@ -160,7 +162,7 @@ def test_same_app_card_uses_original_open_id(client):
 @pytest.mark.parametrize('event,expected', [('leader_confirmed', ['ou_first', 'ou_second']),
                                          ('assignee_confirmed', ['ou_creator'])])
 def test_confirmation_recipients_and_event_dedup(client, monkeypatch, event, expected):
-    from app.notifications import confirmation
+    from app.notifications import notify_record
     client.settings = replace(client.settings, alert_app_id=client.settings.app_id)
     mapping = MAPPING | {k: k for k in ['assignee', 'creator', 'leader_confirmed', 'assignee_confirmed', 'cancelled', 'completed_at']}
     path = client.settings.fields_path.parent / 'notifications.toml'
@@ -174,19 +176,170 @@ def test_confirmation_recipients_and_event_dedup(client, monkeypatch, event, exp
     fields.pop('recommendation_result')
     send = Mock(return_value='om_ok')
     monkeypatch.setattr(FeishuClient, 'send_card', send)
-    assert confirmation('recConfirm', event, mapping, client) == 'sent_or_duplicate'
-    assert confirmation('recConfirm', event, mapping, client) == 'sent_or_duplicate'
+    assert notify_record('recConfirm', event, mapping, client) == 'sent_or_duplicate'
+    assert notify_record('recConfirm', event, mapping, client) == 'sent_or_duplicate'
     assert [c.args[0] for c in send.call_args_list] == expected
     card = send.call_args.args[1]
     assert len(card['body']['elements']) == 2
     assert '最终负责人' in card['body']['elements'][0]['content']
     assert '推荐负责人' not in card['body']['elements'][0]['content']
     fields[event] = False
-    assert confirmation('recConfirm', event, mapping, client) == 'skipped'
+    assert notify_record('recConfirm', event, mapping, client) == 'skipped'
     fields[event] = True
     fields['assignee'] = [{'id': 'ou_third', 'name': '丙'}]
-    assert confirmation('recConfirm', event, mapping, client) == 'sent_or_duplicate'
+    assert notify_record('recConfirm', event, mapping, client) == 'sent_or_duplicate'
     assert send.call_count == len(expected) + 1
     fields['cancelled'] = True
-    assert confirmation('recConfirm', event, mapping, client) == 'skipped'
+    assert notify_record('recConfirm', event, mapping, client) == 'skipped'
     client.update_record.assert_not_called()
+
+
+@pytest.fixture
+def deadline_client(client, monkeypatch):
+    """构造当天截止、多人负责的独立通知场景。"""
+    monkeypatch.setenv('TZ', 'Asia/Shanghai')
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = datetime(2026, 10, 19, 9, tzinfo=ZoneInfo('Asia/Shanghai'))
+    monkeypatch.setattr('app.notifications.datetime', clock)
+    client.settings = replace(client.settings, alert_app_id=client.settings.app_id)
+    mapping = MAPPING | {k: k for k in ['assignee', 'creator', 'deadline', 'cancelled', 'completed_at']}
+    path = client.settings.fields_path.parent / 'notifications.toml'
+    path.write_text(path.read_text() + '\n[deadline_reminder]\nenabled=true\nrecipient_field="assignee"\n')
+    client.get_record.return_value = {
+        'title': '到期需求', 'platform': '测试平台',
+        'submitter': [{'id': 'ou_requester', 'name': '提报人'}],
+        'assignee': [{'id': 'ou_first', 'name': '甲'}, {'id': 'ou_second', 'name': '乙'},
+                     {'id': 'ou_first', 'name': '甲'}],
+        'deadline': int(clock.now.return_value.replace(hour=0).timestamp() * 1000),
+    }
+    return client, mapping, clock
+
+
+def test_deadline_sends_to_all_current_owners_once(deadline_client, monkeypatch):
+    """按最终负责人逐人发送，重复人员和重复请求均不重复通知。"""
+    client, mapping, _ = deadline_client
+    send = Mock(return_value='om_due')
+    monkeypatch.setattr(FeishuClient, 'send_card', send)
+    for _ in range(2):
+        assert notify_record('recDue', 'deadline_reminder', mapping, client) == 'sent_or_duplicate'
+    assert [call.args[0] for call in send.call_args_list] == ['ou_first', 'ou_second']
+    card = send.call_args.args[1]
+    assert card['header'] == {'title': {'tag': 'plain_text', 'content': '美工任务 · 截止日期提醒'},
+                              'template': 'purple'}
+    body = card['body']['elements'][0]['content']
+    assert body.startswith('**任务即将到期**\n\n')
+    assert '任务名称' in body and '到期需求' in body and '需求人员' in body and '所属平台' in body
+    assert '<at id="ou_requester"></at>' in body
+    assert '推荐负责人' not in body
+    assert 'record=recDue' in card['body']['elements'][1]['behaviors'][0]['default_url']
+    client.update_record.assert_not_called()
+
+
+@pytest.mark.parametrize('change', [
+    {'assignee': []}, {'cancelled': True}, {'cancelled': 1}, {'completed_at': 1792339200000},
+    {'deadline': None}, {'deadline': ''}, {'deadline': 1792252800000}, {'deadline': 1792425600000},
+])
+def test_deadline_skips_ineligible_latest_record(deadline_client, monkeypatch, change):
+    """最新记录已结束、无人负责或截止日不是今天时不发送。"""
+    client, mapping, _ = deadline_client
+    client.get_record.return_value.update(change)
+    send = Mock()
+    monkeypatch.setattr(FeishuClient, 'send_card', send)
+    assert notify_record('recDue', 'deadline_reminder', mapping, client) == 'skipped'
+    send.assert_not_called()
+
+
+def test_deadline_new_owner_does_not_repeat_existing_owner(deadline_client, monkeypatch):
+    """同一截止日增换负责人时，只通知尚未收到提醒的人员。"""
+    client, mapping, _ = deadline_client
+    send = Mock(return_value='om_due')
+    monkeypatch.setattr(FeishuClient, 'send_card', send)
+    notify_record('recDue', 'deadline_reminder', mapping, client)
+    client.get_record.return_value['assignee'] = [
+        {'id': 'ou_second', 'name': '乙'}, {'id': 'ou_third', 'name': '丙'}]
+    notify_record('recDue', 'deadline_reminder', mapping, client)
+    client.get_record.return_value['assignee'].reverse()
+    notify_record('recDue', 'deadline_reminder', mapping, client)
+    assert [call.args[0] for call in send.call_args_list] == ['ou_first', 'ou_second', 'ou_third']
+
+
+def test_deadline_reschedule_allows_new_date_reminder(deadline_client, monkeypatch):
+    """调整到新的截止日后可以再次提醒，同日修改时间不重复提醒。"""
+    client, mapping, clock = deadline_client
+    send = Mock(return_value='om_due')
+    monkeypatch.setattr(FeishuClient, 'send_card', send)
+    notify_record('recDue', 'deadline_reminder', mapping, client)
+    client.get_record.return_value['deadline'] += 3600 * 1000
+    notify_record('recDue', 'deadline_reminder', mapping, client)
+    assert send.call_count == 2
+    client.get_record.return_value['deadline'] += 24 * 3600 * 1000
+    assert notify_record('recDue', 'deadline_reminder', mapping, client) == 'skipped'
+    clock.now.return_value = clock.now.return_value.replace(day=20)
+    notify_record('recDue', 'deadline_reminder', mapping, client)
+    assert send.call_count == 4
+    assert send.call_args_list[0].args[2] != send.call_args_list[2].args[2]
+
+
+def test_deadline_partial_failure_retries_only_failed_owner(deadline_client, monkeypatch):
+    """部分人员发送失败后，相同请求只补发失败人员，保留消息 UUID。"""
+    client, mapping, _ = deadline_client
+    send = Mock(side_effect=['om_first', RuntimeError('模拟失败'), 'om_second'])
+    monkeypatch.setattr(FeishuClient, 'send_card', send)
+    with pytest.raises(RuntimeError, match='可重试'):
+        notify_record('recDue', 'deadline_reminder', mapping, client)
+    assert notify_record('recDue', 'deadline_reminder', mapping, client) == 'sent_or_duplicate'
+    assert [call.args[0] for call in send.call_args_list] == ['ou_first', 'ou_second', 'ou_second']
+    assert send.call_args_list[1].args[2] == send.call_args_list[2].args[2]
+
+
+def test_disabled_deadline_does_not_read_record(deadline_client):
+    """关闭提醒配置时直接返回关闭状态。"""
+    client, mapping, _ = deadline_client
+    path = client.settings.fields_path.parent / 'notifications.toml'
+    path.write_text('[deadline_reminder]\nenabled=false\n')
+    assert notify_record('recDue', 'deadline_reminder', mapping, client) == 'disabled'
+    client.get_record.assert_not_called()
+
+
+def test_deadline_recipient_field_must_be_final_owner(deadline_client, monkeypatch):
+    """截止提醒只支持最终负责人字段，错误配置不得发送给其他人。"""
+    client, mapping, _ = deadline_client
+    path = client.settings.fields_path.parent / 'notifications.toml'
+    path.write_text('[deadline_reminder]\nenabled=true\nrecipient_field="creator"\n')
+    send = Mock()
+    monkeypatch.setattr(FeishuClient, 'send_card', send)
+    with pytest.raises(ValueError, match='assignee'):
+        notify_record('recDue', 'deadline_reminder', mapping, client)
+    send.assert_not_called()
+
+
+def test_deadline_converts_each_owner_to_alert_open_id(deadline_client, monkeypatch):
+    """数据应用和通知应用不同时，通过 Union ID 转换每位收件人。"""
+    client, mapping, _ = deadline_client
+    client.settings = replace(client.settings, alert_app_id='different-alert-app')
+    client.get_contact_user.side_effect = lambda uid: {'union_id': 'on_' + uid}
+    monkeypatch.setattr(FeishuClient, 'get_contact_user_by_union_id',
+                        lambda self, uid: {'open_id': 'ou_alert' + uid.removeprefix('on_ou_')})
+    send = Mock(return_value='om_due')
+    monkeypatch.setattr(FeishuClient, 'send_card', send)
+    notify_record('recDue', 'deadline_reminder', mapping, client)
+    assert [call.args[0] for call in send.call_args_list] == ['ou_alertfirst', 'ou_alertsecond']
+
+
+@pytest.mark.parametrize('value', [True, '日期无效', float('nan'), float('inf')])
+def test_invalid_deadline_is_retryable_error(deadline_client, monkeypatch, value):
+    """无效截止时间抛出异常，不产生提醒或错误去重记录。"""
+    client, mapping, _ = deadline_client
+    client.get_record.return_value['deadline'] = value
+    send = Mock()
+    monkeypatch.setattr(FeishuClient, 'send_card', send)
+    with pytest.raises(ValueError, match='毫秒时间戳'):
+        notify_record('recDue', 'deadline_reminder', mapping, client)
+    send.assert_not_called()
+
+
+def test_deadline_uses_service_timezone_for_timestamp(deadline_client):
+    """UTC 的前一日晚间属于服务时区的下一自然日，数字字符串也可读取。"""
+    _, _, clock = deadline_client
+    value = int(datetime.fromisoformat('2026-10-18T16:00:00+00:00').timestamp() * 1000)
+    assert deadline_date(str(value)) == clock.now.return_value.date()

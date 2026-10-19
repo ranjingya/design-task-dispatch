@@ -245,9 +245,9 @@ sudo find logs -type f -exec chmod 0640 {} +
 docker compose exec design-task-dispatch .venv/bin/python -m app.cli notify recXXXXXXXX
 ```
 
-上线时同步 `config/notifications.toml` 与通知应用环境变量，再重建容器。缺少 TOML 文件或没有启用的接收人时跳过发送。新增需求自动化保留 HTTP 触发步骤，关闭原来的直接发送消息步骤，避免提前或重复通知。最终负责人、组长确认等通知由多维表自动化调用确认通知 HTTP 接口。
+上线时同步 `config/notifications.toml` 与通知应用环境变量，再重建容器。缺少 TOML 文件或没有启用的接收人时跳过发送。新增需求自动化保留 HTTP 触发步骤，关闭原来的直接发送消息步骤，避免提前或重复通知。确认与截止提醒由多维表自动化调用流程通知 HTTP 接口。
 
-## 确认通知 HTTP 接口
+## 流程通知 HTTP 接口
 
 多维表自动化以 `POST /webhook/notify` 调用程序，Headers 为 `Content-Type: application/json` 和 `X-Webhook-Token: <与新增需求相同的鉴权值>`，Params 留空。JSON 请求体包含 `record_id`（插入触发记录的记录 ID）和 `event`。
 
@@ -255,10 +255,15 @@ docker compose exec design-task-dispatch .venv/bin/python -m app.cli notify recX
 |---|---|---|---|
 | `leader_confirmed` | 组长确认勾选，最终负责人不为空 | 最终负责人中的所有人 | 美工任务上新 · 已分配：任务名称、需求说明、所属平台、需求人员、最终负责人 |
 | `assignee_confirmed` | 负责人确认勾选，最终负责人不为空 | 创建人 | 美工任务 · 负责人已接收确认：任务名称、最终负责人 |
+| `deadline_reminder` | 截止日期当天 09:00，实际完成时间为空 | 最终负责人中的所有人 | 美工任务 · 截止日期提醒：任务即将到期、任务名称、需求人员、所属平台 |
 
-两种通知均为紫色卡片，提供查看需求按钮。TOML 中对应事件的 `enabled` 控制启用；`recipient_field` 引用字段映射键，分别为 `assignee`、`creator`。动态人员 Open ID 通过 Union ID 转换为通知应用下的身份，解析失败时返回 503，不发送给其他人。
+通知均为紫色卡片，提供查看需求按钮。TOML 中对应事件的 `enabled` 控制启用；`recipient_field` 引用字段映射键。组长确认与截止提醒使用 `assignee`，负责人确认使用 `creator`。动态人员 Open ID 通过 Union ID 转换为通知应用下的身份，解析失败时返回 503，不发送给其他人。
 
-接口同步读取最新记录、校验状态并发送，不调用 AI 或修改任务。已取消、已完成或不满足确认条件返回 `skipped`；配置关闭返回 `disabled`；全部成功或已发送返回 `sent_or_duplicate`。业务失败返回 503，可重试相同请求，成功接收人不重复发送。每种事件按记录、最终负责人列表及接收人持久化去重；调整最终负责人后可重新通知，同一负责人组合取消勾选再勾选不会重复通知。调用超时也可重试同一请求。
+接口同步读取最新记录、校验状态并发送，不调用 AI 或修改任务。已取消、已完成、没有最终负责人或不满足事件条件时返回 `skipped`；配置关闭返回 `disabled`；全部成功或已发送返回 `sent_or_duplicate`。业务失败返回 503，可重试相同请求，成功接收人不重复发送。调用超时也可重试同一请求。
+
+确认事件按记录、最终负责人列表及接收人持久化去重；调整最终负责人后可重新通知，同一负责人组合取消勾选再勾选不会重复通知。
+
+截止提醒由多维表自动化负责 09:00 的定时触发。程序读取最新截止时间，仅在服务时区的当天截止时发送；Docker 时区为 Asia/Shanghai。该事件不依赖组长确认或负责人确认勾选。提醒按记录、截止日期及接收人去重，同一截止日增换负责人时仅通知新接收人，调整到新的截止日期后可以再次提醒。
 
 ```json
 {"event":"leader_confirmed","record_id":"recXXXXXXXX"}
@@ -266,4 +271,8 @@ docker compose exec design-task-dispatch .venv/bin/python -m app.cli notify recX
 
 ```json
 {"event":"assignee_confirmed","record_id":"recXXXXXXXX"}
+```
+
+```json
+{"event":"deadline_reminder","record_id":"recXXXXXXXX"}
 ```

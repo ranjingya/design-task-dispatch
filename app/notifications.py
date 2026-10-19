@@ -1,4 +1,4 @@
-"""新增需求通知：读取容器外配置，使用独立应用机器人私聊并持久化去重。"""
+"""需求流程通知：读取容器外配置，使用独立应用机器人私聊并持久化去重。"""
 
 import fcntl
 import hashlib
@@ -10,27 +10,30 @@ import re
 import time
 import tomllib
 from dataclasses import replace
+from datetime import datetime
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from app.feishu import FeishuClient
 from app.rules import plain
 
 logger = logging.getLogger(__name__)
+RECORD_NOTIFICATION_EVENTS = frozenset({"leader_confirmed", "assignee_confirmed", "deadline_reminder"})
 
 
 def load_notifications(path, event="new_task"):
-    """功能说明：读取通知配置。参数 path：TOML 路径；event：通知事件。返回值：通过校验的新增需求配置，未启用时返回空字典。"""
+    """功能说明：读取通知配置。参数 path：TOML 路径；event：通知事件。返回值：通过校验的事件配置，未启用时返回空字典。"""
     if not path.exists():
         logger.debug("新增通知未配置")
         return {}
     config = tomllib.loads(path.read_text(encoding="utf-8")).get(event, {})
     if not isinstance(config, dict) or type(config.get("enabled", False)) is not bool:
-        raise ValueError("new_task.enabled 必须是布尔值")
+        raise ValueError(f"{event}.enabled 必须是布尔值")
     if not config.get("enabled", False):
         return {}
     people = config.get("recipients", [])
     if not isinstance(people, list):
-        raise ValueError("new_task.recipients 必须为人员列表")
+        raise ValueError(f"{event}.recipients 必须为人员列表")
     seen = set()
     for person in people:
         if not isinstance(person, dict) or type(person.get("enabled")) is not bool:
@@ -102,12 +105,20 @@ def notification_content(record_id, fields, mapping, settings, feishu, event="ne
         title = "美工任务 · 负责人已接收确认"
         lines = [("任务名称", escape_text(value("title")) or "未命名需求"),
                  ("最终负责人", people("assignee"))]
+    elif event == "deadline_reminder":
+        title = "美工任务 · 截止日期提醒"
+        lines = [("任务名称", escape_text(value("title")) or "未命名需求"),
+                 ("需求人员", people("submitter") or "未填写"),
+                 ("所属平台", escape_text(value("platform")) or "未填写")]
     base = quote(settings.base_token, safe="")
     table = quote(settings.table_id, safe="")
     record = quote(record_id, safe="")
     source_url = f"https://feishu.cn/base/{base}?table={table}"
+    text = "\n".join(f"**{label}：** {text}" for label, text in lines)
+    if event == "deadline_reminder":
+        text = "**任务即将到期**\n\n" + text
     elements = [
-        {"tag": "markdown", "content": "\n".join(f"**{label}：** {text}" for label, text in lines)},
+        {"tag": "markdown", "content": text},
         {"tag": "button", "text": {"tag": "plain_text", "content": "查看需求"}, "type": "default",
          "behaviors": [{"type": "open_url", "default_url": source_url + f"&record={record}"}]},
     ]
@@ -141,9 +152,21 @@ def alert_open_id(source_id, feishu, bot):
     return uid
 
 
-def confirmation(record_id, event, mapping, feishu):
-    """功能说明：校验确认状态并发送通知，不修改任务或调用 AI。参数 record_id：需求 ID；event：确认事件；mapping：字段映射；feishu：数据客户端。返回值：sent_or_duplicate、skipped 或 disabled；发送失败抛出异常。"""
-    if event not in {"leader_confirmed", "assignee_confirmed"}:
+def deadline_date(value):
+    """将飞书日期字段的毫秒时间戳转换为服务时区的日期，空值返回空。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError("截止时间必须是有效的毫秒时间戳")
+    try:
+        return datetime.fromtimestamp(float(value) / 1000, ZoneInfo(os.getenv("TZ", "Asia/Shanghai"))).date()
+    except (TypeError, ValueError, OverflowError, OSError):
+        raise ValueError("截止时间必须是有效的毫秒时间戳") from None
+
+
+def notify_record(record_id, event, mapping, feishu):
+    """功能说明：校验最新状态并发送确认或截止提醒，不修改任务或调用 AI。参数 record_id：需求 ID；event：通知事件；mapping：字段映射；feishu：数据客户端。返回值：sent_or_duplicate、skipped 或 disabled；发送失败抛出异常。"""
+    if event not in RECORD_NOTIFICATION_EVENTS:
         raise ValueError("不支持的通知事件")
     settings = feishu.settings
     config = load_notifications(settings.fields_path.parent / "notifications.toml", event)
@@ -151,11 +174,26 @@ def confirmation(record_id, event, mapping, feishu):
         return "disabled"
     fields = feishu.get_record(record_id)
     owners = fields.get(mapping["assignee"]) or []
-    if not owners or fields.get(mapping[event]) not in (True, 1) or fields.get(mapping["cancelled"]) in (True, 1) or fields.get(mapping["completed_at"]):
+    if not owners or fields.get(mapping["cancelled"]) in (True, 1) or fields.get(mapping["completed_at"]):
         return "skipped"
+    if event == "deadline_reminder":
+        due = deadline_date(fields.get(mapping["deadline"]))
+        today = datetime.now(ZoneInfo(os.getenv("TZ", "Asia/Shanghai"))).date()
+        if due != today:
+            logger.debug("截止提醒跳过：截止日期=%s 当前日期=%s", due, today)
+            return "skipped"
+        allowed_fields = {"assignee"}
+        # 同一截止日每位负责人仅提醒一次，改期后使用新的通知版本。
+        version = due.isoformat()
+    else:
+        if fields.get(mapping[event]) not in (True, 1):
+            return "skipped"
+        allowed_fields = {"assignee", "creator"}
+        # 负责人发生变化时按新的分配通知；重复触发同一分配不会重复发送。
+        version = json.dumps([p["id"] for p in owners])
     source_key = config.get("recipient_field")
-    if source_key not in {"assignee", "creator"}:
-        raise ValueError("确认通知 recipient_field 需为 assignee 或 creator")
+    if source_key not in allowed_fields:
+        raise ValueError(f"{event}.recipient_field 需为 {' 或 '.join(sorted(allowed_fields))}")
     source = fields.get(mapping[source_key]) or []
     if isinstance(source, dict):
         source = [source]
@@ -167,15 +205,13 @@ def confirmation(record_id, event, mapping, feishu):
         uid = alert_open_id(person["id"], feishu, bot)
         if uid not in {p["open_id"] for p in recipients}:
             recipients.append({"open_id": uid, "name": person.get("name") or "记录人员"})
-    # 负责人发生变化时按新的分配通知；重复触发同一分配不会重复发送。
-    version = json.dumps([p["id"] for p in owners])
     if not deliver(record_id, mapping, feishu, recipients, event, fields, version):
-        raise RuntimeError("部分确认通知发送失败，可重试同一请求")
+        raise RuntimeError("部分通知发送失败，可重试同一请求")
     return "sent_or_duplicate"
 
 
 def deliver(record_id, mapping, feishu, recipients, event, fields=None, version=""):
-    """功能说明：按接收人持久化去重并发送卡片。参数 record_id：记录 ID；mapping：字段映射；feishu：数据客户端；recipients：接收人；event：事件；fields：可选记录快照；version：分配版本。返回值：是否全部成功。"""
+    """功能说明：按接收人持久化去重并发送卡片。参数 record_id：记录 ID；mapping：字段映射；feishu：数据客户端；recipients：接收人；event：事件；fields：可选记录快照；version：通知版本。返回值：是否全部成功。"""
     settings = feishu.settings
     if not settings.alert_app_id or not settings.alert_app_secret:
         raise ValueError("请配置 FEISHU_ALERT_APP_ID 和 FEISHU_ALERT_APP_SECRET")
@@ -196,7 +232,7 @@ def deliver(record_id, mapping, feishu, recipients, event, fields=None, version=
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 state = json.loads(path.read_text()) if path.exists() else {}
                 if state.get("sent"):
-                    logger.debug("新增通知跳过：已发送 recipient=%s", person["name"])
+                    logger.debug("通知跳过：已发送 event=%s recipient=%s", event, person["name"])
                     continue
                 # 飞书 UUID 仅保证一小时去重；超时的未知结果不能自动重发。
                 if state and time.time() - state["started_at"] >= 3600:
@@ -212,7 +248,7 @@ def deliver(record_id, mapping, feishu, recipients, event, fields=None, version=
                 logger.info("通知已发送 事件=%s 接收人=%s", event, person["name"])
         except Exception as exc:
             success = False
-            logger.warning("新增通知失败 接收人=%s 原因=%s", person["name"], str(exc))
+            logger.warning("通知失败 事件=%s 接收人=%s 原因=%s", event, person["name"], str(exc))
     return success
 
 
