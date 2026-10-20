@@ -126,8 +126,70 @@ def test_zip_skipped_and_bad_pdf_does_not_stop_other_materials(settings):
                    {"file_token": "excel", "name": "说明.xlsx"}]
     bundle = collect_materials(attachments, None, "recTest", "fldTest", feishu)
     assert feishu.download_attachment.call_count == 2
-    assert len(bundle.issues) == 1 and "需求.pdf" in bundle.issues[0]
+    assert not bundle.issues
+    assert len(bundle.skipped_attachments) == 1 and "需求.pdf" in bundle.skipped_attachments[0]['source']
     assert len(bundle.images) == 1
+
+
+def test_unknown_attachments_do_not_consume_file_budget(settings, config, tmp_path, caplog):
+    """多种未知格式不会阻止后续有效附件读取。"""
+    path = tmp_path / 'materials.json'
+    path.write_text(json.dumps(config | {'max_files': 1}))
+    client = Mock(spec=FeishuClient, settings=replace(settings, materials_path=path))
+    client.download_attachment.return_value = workbook_bytes()
+    attachments = [{'file_token': 'psd', 'name': '模板.PSD'},
+                   {'file_token': 'unknown', 'name': '素材.unknown'},
+                   {'file_token': 'no_extension', 'name': '无后缀素材'},
+                   {'file_token': 'excel', 'name': '需求.xlsx'}]
+    bundle = collect_materials(attachments, None, 'recA', 'fldA', client)
+    assert client.download_attachment.call_count == 1
+    assert client.download_attachment.call_args.args[0] == 'excel'
+    assert len(bundle.skipped_attachments) == 3 and not bundle.issues
+    assert any('请制作商品主图' in row['text'] for row in bundle.texts)
+    assert '跳过附件' in caplog.text and '模板.PSD' in caplog.text
+
+
+@pytest.mark.parametrize('failure', [RuntimeError('下载权限不足'), OSError('读取失败'), b'broken image'])
+def test_unreadable_attachment_keeps_following_valid_file(settings, failure):
+    """下载失败或文件损坏仅排除当前附件。"""
+    client = Mock(spec=FeishuClient, settings=settings)
+    client.download_attachment.side_effect = [failure, workbook_bytes()]
+    bundle = collect_materials([{'file_token': 'broken', 'name': '素材.png'},
+                                {'file_token': 'valid', 'name': '需求.xlsx'}], None, 'recA', 'fldA', client)
+    assert len(bundle.skipped_attachments) == 1 and not bundle.issues
+    assert len(bundle.images) == 1
+    assert all('素材.png' not in item['source'] for item in bundle.image_sources)
+    assert any('请制作商品主图' in row['text'] for row in bundle.texts)
+
+
+@pytest.mark.parametrize('failure_mode', ['exception', 'incomplete'])
+def test_failed_attachment_discards_partial_text_and_images(settings, monkeypatch, failure_mode):
+    """失败附件的部分文字和图片不会混入后续匹配输入。"""
+    client = Mock(spec=FeishuClient, settings=settings)
+    client.download_attachment.side_effect = [b'partial', b'valid']
+
+    def parse(data, suffix, source, bundle):
+        """模拟附件解析中途失败或发现未读内容。"""
+        if data == b'valid':
+            bundle.add_text(source, '有效需求内容')
+            return
+        bundle.add_text(source, '失败附件的片段')
+        image = io.BytesIO()
+        Image.new('RGB', (20, 20), 'white').save(image, format='PNG')
+        bundle.add_image(image.getvalue(), source)
+        if failure_mode == 'exception':
+            raise RuntimeError('文档后半部分无法解析')
+        bundle.issue(source, '文档后半部分无法解析')
+
+    monkeypatch.setattr('app.documents.read_document', parse)
+    bundle = collect_materials([{'file_token': 'partial', 'name': '不完整.pdf'},
+                                {'file_token': 'valid', 'name': '需求.pdf'}], None, 'recA', 'fldA', client)
+    assert [row['text'] for row in bundle.texts] == ['有效需求内容']
+    assert not bundle.images and not bundle.image_sources and not bundle.image_parts
+    assert bundle.image_size == 0
+    assert bundle.text_size == sum(len(row['source']) + len(row['text']) for row in bundle.texts)
+    assert len(bundle.skipped_attachments) == 1 and not bundle.issues
+    assert bundle.file_size == len(b'partialvalid')
 
 
 @pytest.mark.parametrize("link", ["https://evil.example/sheets/abc", "https://kocotree.feishu.cn.evil.example/sheets/abc",

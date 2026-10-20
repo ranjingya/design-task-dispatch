@@ -102,7 +102,7 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
                                          record_id, attachment_field.get("field_id", ""), feishu)
             demand["materials"] = material.texts
             demand["image_sources"] = material.image_sources
-            # 未读取的材料显式传入，让模型列出候选；程序禁止此时给出确定评级。
+            # 在线资料读取缺口显式传入；已跳过的附件不参与评级。
             demand["material_issues"] = material.issues
             text_size, image_count = material.text_size, len(material.images)
             logger.info("需求就绪 部门=%s 规则=%d 图片=%d 文档文字=%d", department, len(eligible), image_count, text_size)

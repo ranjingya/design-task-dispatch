@@ -122,6 +122,21 @@ def test_base_attachment_uses_original_location(bundle):
     assert len(bundle.images) == 1
 
 
+def test_embedded_unreadable_attachments_keep_document_body(bundle):
+    """在线文档中的未知附件和损坏图片不会阻止正文及其余图片识别。"""
+    client = Mock(spec=FeishuClient)
+    client.material_list.return_value = ([text_block('a', '制作商品主图'),
+        {'block_id': 'file', 'block_type': 23, 'file': {'token': 'psd', 'name': '模板.psd'}},
+        {'block_id': 'broken', 'block_type': 27, 'image': {'token': 'broken'}},
+        {'block_id': 'valid', 'block_type': 27, 'image': {'token': 'valid'}}], False)
+    client.download_material_media.side_effect = [RuntimeError('图片下载失败'), picture()]
+    OnlineReader(client, bundle).read_link('https://kocotree.feishu.cn/docx/doc', '需求')
+    assert [row['text'] for row in bundle.texts] == ['制作商品主图']
+    assert len(bundle.images) == 1 and len(bundle.skipped_attachments) == 2
+    assert not bundle.issues
+    assert client.download_material_media.call_count == 2
+
+
 def test_document_limit_and_unsupported_block_report_issues(bundle):
     client = Mock(spec=FeishuClient)
     client.material_list.return_value = ([text_block('a', '正文'), {'block_id': 'b', 'block_type': 999}], True)

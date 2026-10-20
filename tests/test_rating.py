@@ -75,13 +75,15 @@ def test_missing_input_writes_review_without_ai(feishu, monkeypatch):
     assert "说明" in feishu.update_record.call_args.args[1]["结果"]
 
 
-def test_unsupported_attachment_provides_candidates(feishu, monkeypatch):
-    classify = Mock(return_value=REVIEW)
+def test_unsupported_attachment_does_not_block_rating(feishu, monkeypatch):
+    classify = Mock(return_value=RATED)
     monkeypatch.setattr(AIClient, "classify", classify)
-    feishu.get_record.return_value["材料"] = [{"file_token": "file", "type": "application/msword"}]
+    feishu.get_record.return_value["材料"] = [{"file_token": "file", "name": "模板.psd"}]
     process_record("recTest", MAPPING, feishu)
-    assert "附件 1" in classify.call_args.args[0]["material_issues"][0]
-    assert "待确认｜测试类型" in feishu.update_record.call_args.args[1]["结果"]
+    assert not classify.call_args.args[0]["material_issues"]
+    feishu.download_attachment.assert_not_called()
+    assert feishu.update_record.call_args.args[1]["类别"] == RATED['work_type']
+    assert feishu.update_record.call_args.args[1]["分数"] == 2
 
 
 def test_model_failure_is_retryable_and_does_not_write_type(feishu, monkeypatch):
@@ -175,13 +177,13 @@ def test_image_limits_content_and_download_errors(feishu):
     feishu.download_attachment.return_value = output.getvalue()
     item = {"file_token": "file", "type": "image/png", "size": 20}
     bundle = collect_materials([item, item], None, "recTest", "fldImage", feishu)
-    images, issues = bundle.images, bundle.issues
-    assert len(images) == 1 and len(issues) == 1
+    images = bundle.images
+    assert len(images) == 1 and len(bundle.skipped_attachments) == 1 and not bundle.issues
     assert "data:image/jpeg;base64," in images[0]["image_url"]["url"]
     feishu.download_attachment.return_value = b"not an image"
-    assert collect_materials([item], None, "recTest", "fldImage", feishu).issues
+    assert collect_materials([item], None, "recTest", "fldImage", feishu).skipped_attachments
     feishu.download_attachment.side_effect = RuntimeError("下载失败")
-    assert collect_materials([item], None, "recTest", "fldImage", feishu).issues
+    assert collect_materials([item], None, "recTest", "fldImage", feishu).skipped_attachments
 
 
 def test_download_stream_limit_and_permission_context(settings, monkeypatch):

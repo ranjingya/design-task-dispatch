@@ -188,8 +188,8 @@ class OnlineReader:
             return False
 
     def media(self, item, source, context='', image=False, **location):
-        """限量读取在线资源的图片或附件，共用附件解析策略。"""
-        try:
+        """功能说明：读取在线图片或附件，失败时排除该文件。参数 item：素材信息；source：来源；context：附近文字；image：是否为图片块；location：来源多维表的定位参数。返回值：无。"""
+        with self.bundle.read_attachment(source):
             name = item.get('name', '')
             if not image and Path(name).suffix.lower() in ('.zip', '.rar', '.7z'):
                 self.bundle.add_text(source, '素材压缩包不参与识别')
@@ -197,9 +197,9 @@ class OnlineReader:
             if image and not self.bundle.image_available(source):
                 return
             if not image:
-                self.bundle.claim_file()
                 if Path(name).suffix.lower() not in ('.doc', '.docx', '.xlsx', '.xls', '.pdf', '.png', '.jpg', '.jpeg', '.webp'):
                     raise ValueError(f'内嵌附件类型暂不支持：{name or "未提供文件名"}')
+                self.bundle.claim_file()
             data = self.feishu.download_material_media(item.get('token') or item.get('file_token'), self.bundle.file_limit(), **location)
             self.bundle.file_size += len(data)
             if image or Path(name).suffix.lower() in ('.png', '.jpg', '.jpeg', '.webp'):
@@ -208,10 +208,6 @@ class OnlineReader:
                                       requires_detail=not context or any(word in context for word in keywords))
             else:
                 read_document(data, Path(name).suffix.lower(), source + ' / ' + name, self.bundle)
-        except (ValueError, RuntimeError) as exc:
-            self.bundle.issue(source, str(exc))
-        except Exception:
-            self.bundle.issue(source, '在线图片或附件无法完整解析')
 
     def read_base(self, token, selection, source):
         """功能说明：读取指定多维表范围及其附件。参数 token：Base令牌；selection：数据表、视图、记录定位；source：来源。返回值：无。"""

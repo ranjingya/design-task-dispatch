@@ -1,6 +1,7 @@
 """整理需求附件与飞书在线资料，控制材料读取限额。"""
 
 import base64
+from contextlib import contextmanager
 import logging
 import time
 
@@ -17,6 +18,8 @@ class MaterialBundle:
         self.settings, self.config = settings, config
         self.texts, self.images, self.issues, self.image_sources = [], [], [], []
         self.image_parts = []
+        self.skipped_attachments = []
+        self._attachment_issues = None
         self.text_size = self.image_size = self.file_size = self.file_count = 0
 
     def file_limit(self):
@@ -34,9 +37,36 @@ class MaterialBundle:
 
     def issue(self, source, reason):
         value = f"{source}：{reason}"
+        if self._attachment_issues is not None:
+            if value not in self._attachment_issues:
+                self._attachment_issues.append(value)
+            return
         if value not in self.issues:
             self.issues.append(value)
             logger.warning("需求材料读取不完整：%s", value)
+
+    @contextmanager
+    def read_attachment(self, source):
+        """功能说明：隔离单个附件读取，失败时排除其内容并继续处理。参数 source：附件来源名称。返回值：附件读取上下文，失败原因写入跳过列表和日志。"""
+        collections = (self.texts, self.images, self.image_parts, self.image_sources)
+        lengths = [len(values) for values in collections]
+        text_size, image_size = self.text_size, self.image_size
+        previous_issues = self._attachment_issues
+        issues = self._attachment_issues = []
+        try:
+            yield
+            if issues:
+                raise ValueError("；".join(issues))
+        except Exception as exc:
+            # 排除失败附件的部分解析结果；已发生的下载仍占用文件读取限额。
+            for values, length in zip(collections, lengths):
+                del values[length:]
+            self.text_size, self.image_size = text_size, image_size
+            reason = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else f"文件无法解析（{type(exc).__name__}）"
+            self.skipped_attachments.append({"source": source, "reason": reason})
+            logger.warning("跳过附件 来源=%s 原因=%s", source, reason)
+        finally:
+            self._attachment_issues = previous_issues
 
     def add_text(self, source, value):
         value = str(value).strip()
@@ -142,21 +172,21 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx"}
     for index, item in enumerate(attachments, 1):
         source = f"附件 {index}"
-        try:
+        name = str(item.get("name", ""))[:200] if isinstance(item, dict) else ""
+        source += f"（{name}）" if name else ""
+        with bundle.read_attachment(source):
             if not isinstance(item, dict) or not item.get("file_token"):
                 raise ValueError("附件信息不完整")
-            name = str(item.get("name", ""))[:200]
-            source += f"（{name}）" if name else ""
             mime = item.get("type", "")
             suffix = Path(name).suffix.lower() or mime_suffix.get(mime, "")
             if suffix in (".zip", ".rar", ".7z") or mime in ("application/zip", "application/x-zip-compressed"):
                 bundle.add_text(source, "素材压缩包不参与识别，未读取内容")
                 logger.debug("跳过素材压缩包：record_id=%s index=%d", record_id, index)
                 continue
-            bundle.claim_file()
             image_file = mime in ("image/png", "image/jpeg", "image/webp") or suffix in (".png", ".jpg", ".jpeg", ".webp")
             if not image_file and suffix not in (".xlsx", ".xls", ".pdf", ".docx", ".doc"):
                 raise ValueError("附件格式暂不支持")
+            bundle.claim_file()
             limit = min(config["max_file_bytes"], config["max_total_file_bytes"] - bundle.file_size)
             if limit <= 0 or item.get("size", 0) > limit:
                 raise ValueError("附件大小超过上限")
@@ -171,11 +201,6 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
             else:
                 read_document(data, suffix, source, bundle)
             logger.debug("附件读取完成：record_id=%s index=%d", record_id, index)
-        except (ValueError, RuntimeError) as exc:
-            bundle.issue(source, str(exc))
-        except Exception as exc:
-            logger.warning("附件解析异常 index=%d error_type=%s", index, type(exc).__name__)
-            bundle.issue(source, "文件损坏、加密或包含无法解析的内容")
     if document_link:
         from app.online_materials import OnlineReader, document_links
         reader = OnlineReader(feishu, bundle)
@@ -196,5 +221,5 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
             except Exception as exc:
                 logger.warning('在线资料解析异常 error_type=%s', type(exc).__name__)
                 bundle.issue(source, '在线资料无法完整解析')
-    logger.debug("材料整理完成：record_id=%s text_chars=%d images=%d issues=%d elapsed=%.2fs", record_id, bundle.text_size, len(bundle.images), len(bundle.issues), time.monotonic() - started)
+    logger.debug("材料整理完成：record_id=%s text_chars=%d images=%d skipped=%d issues=%d elapsed=%.2fs", record_id, bundle.text_size, len(bundle.images), len(bundle.skipped_attachments), len(bundle.issues), time.monotonic() - started)
     return bundle
