@@ -5,6 +5,7 @@
   "platform": "平台",
   "deadline": "截止时间",
   "attachments": "附件",
+  "description_attachments": "需求说明附件",
   "notes": "备注",
   "work_type": "工作类型",
   "rule_explanation": "匹配结果",

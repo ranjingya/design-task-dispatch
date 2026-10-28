@@ -27,7 +27,7 @@
 
 在 `.env` 配置同一 Base 下的 `FEISHU_RULES_TABLE_ID`，以及 `DEEPSEEK_BASE_URL`、`DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL`。接口地址可包含 `/v1`，程序追加 `/chat/completions`。模型使用思考模式进行规则判断，输出上限默认 16384 tokens（包含模型推理），可通过 `AI_MAX_OUTPUT_TOKENS` 设置为 1024～32768。默认超时 90 秒，可通过 `AI_TIMEOUT_SECONDS` 调整；`AI_MAX_ATTEMPTS` 为总尝试次数，范围 1～3。
 
-`config/fields.json` 中 `work_type`、`level` 对应「工作类型」「分类等级」单选字段，`department` 对应「部门」单选字段，`platform` 对应「平台」文本字段，`load_score` 对应「任务负载分」数字字段，`rule_explanation` 对应「匹配结果」文本字段，`attachments` 对应附件字段。`config/rule_fields.json` 映射规则表的类型、内容、部门、默认等级、调整说明、分配方式和人员负载分数，每次任务重新读取。规则表与需求表位于同一 Base。
+`config/fields.json` 中 `work_type`、`level` 对应「工作类型」「分类等级」单选字段，`department` 对应「部门」单选字段，`platform` 对应「平台」文本字段，`load_score` 对应「任务负载分」数字字段，`rule_explanation` 对应「匹配结果」文本字段，`attachments` 对应「附件」，`description_attachments` 对应「需求说明附件」。两列附件分别按各自字段权限下载，统一纳入 AI 分析，共用解析方式和读取限额。`config/rule_fields.json` 映射规则表的类型、内容、部门、默认等级、调整说明、分配方式和人员负载分数，每次任务重新读取。规则表与需求表位于同一 Base。
 
 首次处理时，程序将创建人复制到空白的「需求人」人员字段；已有值保持不变，重跑保留手动修改，后续评级失败也保留已初始化的需求人。创建人字段只读，用于需求人初始化和部门归属。
 

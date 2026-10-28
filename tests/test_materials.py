@@ -124,7 +124,7 @@ def test_zip_skipped_and_bad_pdf_does_not_stop_other_materials(settings):
     attachments = [{"file_token": "zip", "name": "图片.zip", "type": "application/zip"},
                    {"file_token": "pdf", "name": "需求.pdf"},
                    {"file_token": "excel", "name": "说明.xlsx"}]
-    bundle = collect_materials(attachments, None, "recTest", "fldTest", feishu)
+    bundle = collect_materials({"fldTest": attachments}, None, "recTest", feishu)
     assert feishu.download_attachment.call_count == 2
     assert not bundle.issues
     assert len(bundle.skipped_attachments) == 1 and "需求.pdf" in bundle.skipped_attachments[0]['source']
@@ -141,7 +141,7 @@ def test_unknown_attachments_do_not_consume_file_budget(settings, config, tmp_pa
                    {'file_token': 'unknown', 'name': '素材.unknown'},
                    {'file_token': 'no_extension', 'name': '无后缀素材'},
                    {'file_token': 'excel', 'name': '需求.xlsx'}]
-    bundle = collect_materials(attachments, None, 'recA', 'fldA', client)
+    bundle = collect_materials({'fldA': attachments}, None, 'recA', client)
     assert client.download_attachment.call_count == 1
     assert client.download_attachment.call_args.args[0] == 'excel'
     assert len(bundle.skipped_attachments) == 3 and not bundle.issues
@@ -154,8 +154,8 @@ def test_unreadable_attachment_keeps_following_valid_file(settings, failure):
     """下载失败或文件损坏仅排除当前附件。"""
     client = Mock(spec=FeishuClient, settings=settings)
     client.download_attachment.side_effect = [failure, workbook_bytes()]
-    bundle = collect_materials([{'file_token': 'broken', 'name': '素材.png'},
-                                {'file_token': 'valid', 'name': '需求.xlsx'}], None, 'recA', 'fldA', client)
+    bundle = collect_materials({'fldA': [{'file_token': 'broken', 'name': '素材.png'},
+                                        {'file_token': 'valid', 'name': '需求.xlsx'}]}, None, 'recA', client)
     assert len(bundle.skipped_attachments) == 1 and not bundle.issues
     assert len(bundle.images) == 1
     assert all('素材.png' not in item['source'] for item in bundle.image_sources)
@@ -182,14 +182,34 @@ def test_failed_attachment_discards_partial_text_and_images(settings, monkeypatc
         bundle.issue(source, '文档后半部分无法解析')
 
     monkeypatch.setattr('app.documents.read_document', parse)
-    bundle = collect_materials([{'file_token': 'partial', 'name': '不完整.pdf'},
-                                {'file_token': 'valid', 'name': '需求.pdf'}], None, 'recA', 'fldA', client)
+    bundle = collect_materials({'fldA': [{'file_token': 'partial', 'name': '不完整.pdf'},
+                                        {'file_token': 'valid', 'name': '需求.pdf'}]}, None, 'recA', client)
     assert [row['text'] for row in bundle.texts] == ['有效需求内容']
     assert not bundle.images and not bundle.image_sources and not bundle.image_parts
     assert bundle.image_size == 0
     assert bundle.text_size == sum(len(row['source']) + len(row['text']) for row in bundle.texts)
     assert len(bundle.skipped_attachments) == 1 and not bundle.issues
     assert bundle.file_size == len(b'partialvalid')
+
+
+@pytest.mark.parametrize('limit', ['files', 'images'])
+def test_attachment_fields_share_limits(settings, config, tmp_path, limit):
+    """两列附件共用文件及图片限额，不因增加字段而翻倍。"""
+    if limit == 'files':
+        path = tmp_path / 'materials.json'
+        path.write_text(json.dumps(config | {'max_files': 1}))
+        settings = replace(settings, materials_path=path)
+    else:
+        settings = replace(settings, max_images=1)
+    image = io.BytesIO()
+    Image.new('RGB', (20, 20), 'white').save(image, format='PNG')
+    client = Mock(spec=FeishuClient, settings=settings)
+    client.download_attachment.return_value = image.getvalue()
+    bundle = collect_materials({'fldA': [{'file_token': 'a', 'name': '素材.png'}],
+                                'fldB': [{'file_token': 'b', 'name': '说明.png'}]}, None, 'recA', client)
+    assert len(bundle.images) == 1 and len(bundle.skipped_attachments) == 1
+    assert not bundle.issues
+    assert client.download_attachment.call_count == (1 if limit == 'files' else 2)
 
 
 @pytest.mark.parametrize("link", ["https://evil.example/sheets/abc", "https://kocotree.feishu.cn.evil.example/sheets/abc",
@@ -204,8 +224,8 @@ def test_sheet_link_and_shared_image_limit(settings):
     feishu = Mock(spec=FeishuClient, settings=replace(settings, max_images=1))
     feishu.export_sheet.return_value = workbook_bytes()
     feishu.download_attachment.return_value = workbook_bytes()
-    bundle = collect_materials([{"file_token": "excel", "name": "说明.xlsx"}],
-                               {"link": "https://kocotree.feishu.cn/sheets/abc?sheet=123"}, "recTest", "fldTest", feishu)
+    bundle = collect_materials({"fldTest": [{"file_token": "excel", "name": "说明.xlsx"}]},
+                               {"link": "https://kocotree.feishu.cn/sheets/abc?sheet=123"}, "recTest", feishu)
     assert feishu.export_sheet.call_args.args[0] == "abc"
     assert len(bundle.images) == 1 and any("图片数量" in issue for issue in bundle.issues)
 

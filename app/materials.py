@@ -142,8 +142,8 @@ def sheet_token(value, config):
     return match[1]
 
 
-def collect_materials(attachments, document_link, record_id, field_id, feishu):
-    """功能说明：读取附件与飞书在线资料供评级。参数 attachments：附件列表；document_link：需求文档链接；record_id：记录 ID；field_id：附件字段 ID；feishu：飞书客户端。返回值：含文本、图片、来源及缺口的材料集合。"""
+def collect_materials(attachment_fields, document_link, record_id, feishu):
+    """功能说明：读取多列附件与飞书在线资料供评级，共用材料限额。参数 attachment_fields：附件字段 ID 到该列附件列表的映射；document_link：需求文档链接；record_id：记录 ID；feishu：飞书客户端。返回值：含文本、图片、来源及缺口的材料集合。"""
     import json
     from pathlib import Path
     from app.documents import read_document
@@ -164,13 +164,14 @@ def collect_materials(attachments, document_link, record_id, field_id, feishu):
     from app.visual_review import visual_config
     visual_config(config)
     bundle = MaterialBundle(feishu.settings, config)
-    if not isinstance(attachments, list):
+    if not isinstance(attachment_fields, dict) or any(not isinstance(items, list) for items in attachment_fields.values()):
         raise ValueError("附件字段格式错误")
+    attachments = [(field_id, item) for field_id, items in attachment_fields.items() for item in items]
     mime_suffix = {"application/pdf": ".pdf", "application/vnd.ms-excel": ".xls",
                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
                    "application/msword": ".doc",
                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx"}
-    for index, item in enumerate(attachments, 1):
+    for index, (field_id, item) in enumerate(attachments, 1):
         source = f"附件 {index}"
         name = str(item.get("name", ""))[:200] if isinstance(item, dict) else ""
         source += f"（{name}）" if name else ""

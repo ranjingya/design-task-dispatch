@@ -148,7 +148,7 @@ def test_document_limit_and_unsupported_block_report_issues(bundle):
 def test_one_failed_link_does_not_discard_next(bundle):
     client = Mock(spec=FeishuClient, settings=bundle.settings)
     client.material_list.return_value = ([text_block('a', '有效正文')], False)
-    result = collect_materials([], 'https://evil.test/docx/a\nhttps://kocotree.feishu.cn/docx/b', 'recA', '', client)
+    result = collect_materials({}, 'https://evil.test/docx/a\nhttps://kocotree.feishu.cn/docx/b', 'recA', client)
     assert len(result.issues) == 1
     assert result.texts[0]['text'] == '有效正文'
 

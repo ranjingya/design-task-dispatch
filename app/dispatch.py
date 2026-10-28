@@ -91,15 +91,19 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
         elif missing:
             result = review("需求信息不完整", missing, department)
         else:
-            attachment_name = mapping.get("attachments")
-            attachment_field = schema.get(attachment_name, {})
-            if attachment_name and attachment_field.get("type") != 17:
-                raise ValueError("附件字段映射无效")
+            attachment_fields = {}
+            for key in ("attachments", "description_attachments"):
+                name = mapping.get(key)
+                if not name:
+                    continue
+                field = schema.get(name, {})
+                if field.get("type") != 17 or not field.get("field_id"):
+                    raise ValueError(f"附件字段映射无效：{name}")
+                attachment_fields[field["field_id"]] = fields.get(name) or []
             document_name = mapping.get("document_link")
             if document_name and schema.get(document_name, {}).get("type") != 15:
                 raise ValueError("需求文档链接需为超链接字段，请核对字段映射")
-            material = collect_materials(fields.get(attachment_name) or [], fields.get(mapping.get("document_link")),
-                                         record_id, attachment_field.get("field_id", ""), feishu)
+            material = collect_materials(attachment_fields, fields.get(mapping.get("document_link")), record_id, feishu)
             demand["materials"] = material.texts
             demand["image_sources"] = material.image_sources
             # 在线资料读取缺口显式传入；已跳过的附件不参与评级。

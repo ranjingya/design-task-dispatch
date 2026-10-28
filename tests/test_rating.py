@@ -176,14 +176,14 @@ def test_image_limits_content_and_download_errors(feishu):
     Image.new("RGB", (10, 10), "white").save(output, format="PNG")
     feishu.download_attachment.return_value = output.getvalue()
     item = {"file_token": "file", "type": "image/png", "size": 20}
-    bundle = collect_materials([item, item], None, "recTest", "fldImage", feishu)
+    bundle = collect_materials({"fldImage": [item, item]}, None, "recTest", feishu)
     images = bundle.images
     assert len(images) == 1 and len(bundle.skipped_attachments) == 1 and not bundle.issues
     assert "data:image/jpeg;base64," in images[0]["image_url"]["url"]
     feishu.download_attachment.return_value = b"not an image"
-    assert collect_materials([item], None, "recTest", "fldImage", feishu).skipped_attachments
+    assert collect_materials({"fldImage": [item]}, None, "recTest", feishu).skipped_attachments
     feishu.download_attachment.side_effect = RuntimeError("下载失败")
-    assert collect_materials([item], None, "recTest", "fldImage", feishu).skipped_attachments
+    assert collect_materials({"fldImage": [item]}, None, "recTest", feishu).skipped_attachments
 
 
 def test_download_stream_limit_and_permission_context(settings, monkeypatch):
@@ -425,6 +425,51 @@ def test_pipeline_includes_document_materials(feishu, monkeypatch):
     assert not demand["material_issues"]
     assert len(classify.call_args.args[3]) == 1
     assert feishu.update_record.call_args.args[1]["分数"] == 2
+
+
+@pytest.mark.parametrize('original,description', [(True, False), (False, True), (True, True), (False, False)])
+def test_pipeline_combines_both_attachment_fields(feishu, monkeypatch, original, description):
+    """两列附件均进入同一次 AI 分析，并使用各自字段 ID 下载。"""
+    import io
+    from PIL import Image
+    from test_materials import workbook_bytes
+
+    image = io.BytesIO()
+    Image.new('RGB', (20, 20), 'white').save(image, format='PNG')
+    mapping = MAPPING | {'description_attachments': '说明附件'}
+    feishu.get_fields.return_value = SCHEMA + [{'field_name': '说明附件', 'type': 17, 'field_id': 'fldDescription'}]
+    feishu.get_record.return_value.update({
+        '材料': [{'file_token': 'original', 'name': '原附件.png'}] if original else [],
+        '说明附件': [{'file_token': 'description', 'name': '说明.xlsx'}] if description else [],
+    })
+    files = {'original': image.getvalue(), 'description': workbook_bytes()}
+    feishu.download_attachment.side_effect = lambda token, *args: files[token]
+    classify = Mock(return_value=RATED)
+    monkeypatch.setattr(AIClient, 'classify', classify)
+    process_record('recTest', mapping, feishu)
+
+    classify.assert_called_once()
+    assert len(classify.call_args.args[3]) == int(original) + int(description)
+    demand = classify.call_args.args[0]
+    assert not demand['material_issues']
+    assert any('请制作商品主图' in part['text'] for part in demand['materials']) == description
+    expected = ([('original', 'fldImage')] if original else []) + ([('description', 'fldDescription')] if description else [])
+    assert [(call.args[0], call.args[2]) for call in feishu.download_attachment.call_args_list] == expected
+    assert feishu.update_record.call_args.args[1]['分数'] == 2
+
+
+@pytest.mark.parametrize('field', [{'field_name': '说明附件', 'type': 1, 'field_id': 'fldDescription'},
+                                 {'field_name': '说明附件', 'type': 17}])
+def test_description_attachment_schema_checked_before_download(feishu, monkeypatch, field):
+    """新列的类型和字段 ID 无效时，不向错误字段发起下载。"""
+    mapping = MAPPING | {'description_attachments': '说明附件'}
+    feishu.get_fields.return_value = SCHEMA + [field]
+    classify = Mock()
+    monkeypatch.setattr(AIClient, 'classify', classify)
+    with pytest.raises(ValueError, match='附件字段映射无效'):
+        process_record('recTest', mapping, feishu)
+    classify.assert_not_called()
+    feishu.download_attachment.assert_not_called()
 
 
 def test_creator_department_overrides_existing_department(feishu, monkeypatch):
