@@ -159,7 +159,7 @@ def test_pagination_and_repeated_cursor(settings, monkeypatch):
     client = FeishuClient(settings)
     monkeypatch.setattr(client, "_access_token", lambda: "token")
     request = Mock(side_effect=[{"data": {"items": RAW_RULES, "has_more": True, "page_token": "next"}},
-                               {"data": {"items": [{"record_id": "recTwo", "fields": {"x": "y"}}]}}])
+                               {"data": {"items": [{"record_id": "recTwo", "fields": {"x": "y"}}], "has_more": False}}])
     monkeypatch.setattr(client, "_request", request)
     assert len(client.get_rules()) == 2
     request.side_effect = None

@@ -12,6 +12,7 @@ from app.notifications import RECORD_NOTIFICATION_EVENTS, notify_record
 from app.feishu import FeishuClient
 from app.dispatch import Dispatcher
 from app.task_logging import configure_logging
+from app.task_details import TaskDetailsSync
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,10 @@ def create_app(settings: Settings | None = None, dispatcher=None) -> Flask:
     app.extensions["dispatcher"] = dispatcher
     if owned:
         atexit.register(dispatcher.close)
+        if settings.task_details_table_id:
+            sync = TaskDetailsSync(settings)
+            app.extensions["task_details_sync"] = sync
+            atexit.register(sync.close)
 
     @app.get("/health")
     def health():

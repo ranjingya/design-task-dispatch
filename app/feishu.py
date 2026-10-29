@@ -137,8 +137,15 @@ class FeishuClient:
         while True:
             data = self._request("GET", path, params=params,
                                  headers={"Authorization": f"Bearer {self._access_token()}"})["data"]
-            items.extend(data.get("items", []))
-            if not data.get("has_more"):
+            page = data.get("items")
+            if page is None and data.get("total") == 0 and data.get("has_more") is False:
+                page = []
+            if not isinstance(page, list) or type(data.get("has_more")) is not bool:
+                raise RuntimeError("飞书分页响应不完整，无法确认资源完整")
+            items.extend(page)
+            if not data["has_more"]:
+                if resource == "records" and "total" in data and data["total"] != len(items):
+                    raise RuntimeError("飞书记录总数与完整分页结果不一致")
                 return items
             token = data.get("page_token")
             if not token or token in seen:
@@ -152,9 +159,31 @@ class FeishuClient:
         logger.debug("业务记录加载完成：table_id=%s count=%d", table_id, len(records))
         return records
 
-    def get_fields(self) -> list[dict]:
-        """读取需求表字段结构及单选选项。"""
-        return self._list_all(self.settings.table_id, "fields")
+    def get_fields(self, table_id: str | None = None) -> list[dict]:
+        """读取指定表字段结构；省略 table_id 时读取需求表。"""
+        return self._list_all(table_id or self.settings.table_id, "fields")
+
+    def batch_records(self, table_id: str, action: str, records: list) -> None:
+        """功能说明：分批维护派生表记录并核验返回项。参数 table_id：目标表；action：create、update 或 delete；records：记录对象或删除 ID。返回值：无；结果不完整时抛出异常，下次全量对账恢复。"""
+        if action not in {"create", "update", "delete"}:
+            raise ValueError("不支持的批量记录操作")
+        path = (f"/bitable/v1/apps/{quote(self.settings.base_token, safe='')}/tables/"
+                f"{quote(table_id, safe='')}/records/batch_{action}")
+        for offset in range(0, len(records), 200):
+            batch = records[offset:offset + 200]
+            data = self._request("POST", path, params={"user_id_type": "open_id"},
+                                 json={"records": batch},
+                                 headers={"Authorization": f"Bearer {self._access_token()}"})["data"]
+            result = data.get("records", [])
+            ids = [item.get("record_id") for item in result]
+            valid = len(ids) == len(batch) and all(ids) and len(set(ids)) == len(ids)
+            if action != "create":
+                expected = batch if action == "delete" else [item["record_id"] for item in batch]
+                valid = valid and set(ids) == set(expected)
+            if action == "delete":
+                valid = valid and all(item.get("deleted") is True for item in result)
+            if not valid:
+                raise RuntimeError(f"飞书批量 {action} 结果不完整，需重新对账")
 
     def get_rules(self) -> list[dict]:
         """读取规则表全部记录，保留真实规则 ID 和字段内容。"""
