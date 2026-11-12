@@ -25,7 +25,8 @@ class Settings:
     rules_table_id: str = ""
     members_table_id: str = ""
     product_base_token: str = ""
-    product_table_id: str = ""
+    product_2026_table_id: str = ""
+    product_2027_table_id: str = ""
     ai_base_url: str = "https://api.deepseek.com"
     ai_key: str = field(default="", repr=False)
     ai_model: str = ""
@@ -60,7 +61,8 @@ class Settings:
             rules_table_id=os.getenv("FEISHU_RULES_TABLE_ID", "").strip(),
             members_table_id=os.getenv("FEISHU_MEMBERS_TABLE_ID", "").strip(),
             product_base_token=os.getenv("FEISHU_PRODUCT_BASE_TOKEN", "").strip(),
-            product_table_id=os.getenv("FEISHU_PRODUCT_TABLE_ID", "").strip(),
+            product_2026_table_id=os.getenv("FEISHU_PRODUCT_2026_TABLE_ID", "").strip(),
+            product_2027_table_id=os.getenv("FEISHU_PRODUCT_2027_TABLE_ID", "").strip(),
             ai_base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip().rstrip("/"),
             ai_key=os.getenv("DEEPSEEK_API_KEY", "").strip(),
             ai_model=os.getenv("DEEPSEEK_MODEL", "").strip(),

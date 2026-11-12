@@ -47,6 +47,38 @@ def test_product_single_bundle_platform_and_conflict():
     assert product_owner({'title': '老款'}, records, P)[2] is False
 
 
+def test_product_name_matches_title_or_description_with_normalization():
+    records = [row('p', 商品='XX12345 小晴天防晒帽', 认领='甲')]
+    assert product_owner({'title': '小晴天 防晒帽：修改主图'}, records, P)[0] == '甲'
+    assert product_owner({'description': '小晴天防晒帽需要改图'}, records, P)[0] == '甲'
+    assert product_owner({'title': '小晴天防晒帽', 'platform': '平台甲'}, records, P)[3] is True
+    assert product_owner({'title': 'XX99999 小晴天防晒帽'}, records, P)[3] is False
+    assert product_owner({'title': '防晒帽'}, records, P)[3] is False
+
+
+def test_name_only_source_can_match_demand_with_code_and_exact_name():
+    records = [row('p', 商品='小晴天防晒帽', 认领='甲')]
+    assert product_owner({'title': 'XX12345 小晴天防晒帽改图'}, records, P)[0] == '甲'
+    assert product_owner({'title': 'XX12345'}, records, P)[3] is False
+
+
+def test_names_require_one_product_and_one_nonempty_owner():
+    records = [row('one', 商品='小晴天防晒帽', 认领='甲'), row('two', 商品='小雨天防晒帽', 认领='甲')]
+    assert product_owner({'title': '小晴天防晒帽参考小雨天防晒帽'}, records, P)[0] is None
+    assert product_owner({'title': '小晴天防晒帽参考小雨天防晒帽'}, records, P)[3] is True
+    records[1]['fields']['商品'] = '小晴天防晒帽'
+    assert product_owner({'title': '小晴天防晒帽'}, records, P)[0] == '甲'
+    for owner in ('乙', ''):
+        records[1]['fields']['认领'] = owner
+        assert product_owner({'title': '小晴天防晒帽'}, records, P)[0] is None
+
+
+def test_name_matching_does_not_treat_single_product_as_bundle():
+    records = [row('p', 商品='小晴天防晒帽', 认领='甲')]
+    assert product_owner({'title': '小晴天防晒帽 拼款'}, records, P)[0] is None
+    assert product_owner({'title': 'XX12345+XX12346 小晴天防晒帽'}, records, P)[0] is None
+
+
 def test_shop_requires_unique_department_and_store():
     shops = [{'department': '部门甲', 'aliases': ['店铺一']}, {'department': '部门甲', 'aliases': ['店铺二']}]
     assert shop_owner({'department': '部门甲', 'platform': '店铺一'}, shops) == shops[0]
@@ -59,7 +91,9 @@ def client(tmp_path):
     config = {'members': {'甲': 'a', '乙': 'b'}, 'rotation': ['甲', '乙'],
               'member_table': 'members', 'member_field': '人员', 'excluded_owners': ['退组人员'],
               'ownership_routes': {'product': 'product', 'shop': 'shop'},
-              'product': P | {'base_token': 'external', 'table_id': 'products'},
+              'product': P | {'base_token': 'external', 'table_id': 'products', 'sources': [
+                  {'table_setting': 'product_2026_table_id', 'label': '2026 数据包'},
+                  {'table_setting': 'product_2027_table_id', 'label': '2027 数据包'}]},
               'shops': [{'department': '部门甲', 'aliases': ['店铺一'], 'primary': '甲', 'backup': ['乙']}]}
     member_table = config.pop('member_table')
     product_base = config['product'].pop('base_token')
@@ -68,8 +102,8 @@ def client(tmp_path):
     f = Mock()
     f.settings = SimpleNamespace(fields_path=tmp_path / 'fields.json', rules_cache_path=tmp_path / 'cache/rules.json', table_id='tasks',
                                  members_table_id=member_table,
-                                 product_base_token=product_base, product_table_id=product_table)
-    f.data = {'members': [row('a', 人员=[{'id': 'a'}]), row('b', 人员=[{'id': 'b'}])], 'tasks': [], 'products': []}
+                                 product_base_token=product_base, product_2026_table_id=product_table, product_2027_table_id='products_2027')
+    f.data = {'members': [row('a', 人员=[{'id': 'a'}]), row('b', 人员=[{'id': 'b'}])], 'tasks': [], 'products': [], 'products_2027': []}
     f.get_records.side_effect = lambda table, *args: f.data[table]
     return f
 
@@ -180,6 +214,45 @@ def test_fixed_owner_still_applies_when_its_load_is_unknown(client):
     assert updates['说明'].split('\n\n')[2] == '甲 0（1 条待计分）'
 
 
+def test_2026_name_has_priority_over_2027_code(client):
+    client.data['products'] = [row('old', 商品='小晴天防晒帽', 认领='甲')]
+    client.data['products_2027'] = [row('new', 商品='XX12345 小晴天防晒帽', 认领='乙')]
+    result, _ = run(client, '找对应人员', 'product', {'title': 'XX12345 小晴天防晒帽'})
+    assert result['推荐人'] == [{'id': 'a'}] and '2026 数据包' in result['说明']
+    assert not any(call.args[0] == 'products_2027' for call in client.get_records.call_args_list)
+
+
+def test_2027_is_used_only_when_2026_has_no_product(client):
+    client.data['products'] = [row('other', 商品='XX77777 其他商品', 认领='甲')]
+    client.data['products_2027'] = [row('p', 商品='XX12345 小晴天防晒帽', 认领='乙')]
+    result, _ = run(client, '找对应人员', 'product', {'title': 'XX12345'})
+    assert result['推荐人'] == [{'id': 'b'}] and '2027 数据包' in result['说明']
+    tables = [call.args[0] for call in client.get_records.call_args_list]
+    assert tables.index('products') < tables.index('products_2027')
+
+
+@pytest.mark.parametrize('owners', [('',), ('甲', '乙')])
+def test_2026_conflict_or_missing_owner_does_not_fall_through(client, owners):
+    client.data['products'] = [row(str(i), 商品='XX12345', 认领=owner) for i, owner in enumerate(owners)]
+    client.data['products_2027'] = [row('new', 商品='XX12345', 认领='乙')]
+    result, _ = run(client, '找对应人员', 'product', {'title': 'XX12345'})
+    assert result['推荐人'] == [] and '人工确认' in result['说明']
+    assert not any(call.args[0] == 'products_2027' for call in client.get_records.call_args_list)
+
+
+def test_2026_read_failure_is_not_a_miss(client):
+    original = client.get_records.side_effect
+    def read(table, *args):
+        """模拟优先来源读取失败，其他表仍可读。"""
+        if table == 'products':
+            raise RuntimeError('来源不可用')
+        return original(table, *args)
+    client.get_records.side_effect = read
+    with pytest.raises(RuntimeError, match='来源不可用'):
+        run(client, '找对应人员', 'product', {'title': 'XX12345'})
+    assert not any(call.args[0] == 'products_2027' for call in client.get_records.call_args_list)
+
+
 def test_manual_unconfigured_and_excluded_owner(client):
     assert run(client, '人工分配')[0]['推荐人'] == []
     assert run(client, '')[0]['推荐人'] == []
@@ -212,7 +285,7 @@ def test_configuration_routes_and_members_consistent():
         assert all(n in config['rotation'] for n in [shop['primary']] + shop['backup'])
 
 
-@pytest.mark.parametrize('name', ['members_table_id', 'product_base_token', 'product_table_id'])
+@pytest.mark.parametrize('name', ['members_table_id', 'product_base_token', 'product_2026_table_id', 'product_2027_table_id'])
 def test_missing_resource_config_does_not_recommend(client, name):
     setattr(client.settings, name, '')
     with pytest.raises(ValueError, match='请配置'):
@@ -222,7 +295,7 @@ def test_missing_resource_config_does_not_recommend(client, name):
 def test_resource_ids_only_come_from_settings(client):
     client.settings.members_table_id = 'replacement-members'
     client.settings.product_base_token = 'replacement-base'
-    client.settings.product_table_id = 'replacement-products'
+    client.settings.product_2026_table_id = 'replacement-products'
     client.data['replacement-members'] = client.data.pop('members')
     client.data['replacement-products'] = [row('p', 商品='XX12345', 认领='甲')]
     assert run(client, '找对应人员', 'product', {'title': 'XX12345'})[0]['推荐人'] == [{'id': 'a'}]

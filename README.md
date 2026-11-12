@@ -140,7 +140,7 @@ docker compose logs -f design-task-dispatch
 - 人工分配：系统推荐人留空，推荐结果展示成员负载参考，由组长结合文档中的创意方向及平台要求安排。
 - 找对应人员：按具体规则 ID 查询商品或店铺归属；未配置路径转人工。
 
-商品归属读取数据包分配表的完整分页记录，提取完整货号，区分单款与拼款；拼款要求完整货号组合，并检查配置中的平台限制。多个匹配记录认领人为同一人时可沿用；人员不同、认领为空、货号不全或平台无法对应时转人工。普通商品归属路径中，明确为老款且未查到货号时进入全员负载比较。花菜等排除人员、未配置人员直接转人工。来源读取失败属于推荐失败，不作为无归属兜底。
+商品归属按 `config/recommendation.json` 的 `product.sources` 顺序查询，先查2026新品数据包，未找到对应商品时再查2027新品数据包。每张表读取完整分页记录，优先匹配完整款号，支持以需求标题、说明或备注中明确出现的完整商品标题补充匹配。标题统一全半角、大小写、空格和标点，同名重复记录必须负责人一致；命中不同商品、不同负责人、空负责人、平台限制或不完整拼款时转人工确认。已找到相关记录时保留该来源的判断；来源读取失败直接提示推荐失败。拼款要求完整款号组合。普通商品归属路径中，明确为老款且两表均未查到款号时进入全员负载比较；花菜等排除人员和未配置人员由组长安排。推荐说明展示负责人来源年份。
 
 数据包创意图通过 `product_platform_rules` 配置平台别名和动作：京东／JD 沿用认领人员；拼多多／PDD 排除原认领人员，在其余成员中负载优先、同分轮换。仅依据提报的平台选择策略；平台不明、多个平台或归属不明时转人工。
 
@@ -163,7 +163,8 @@ docker compose logs -f design-task-dispatch
 - `FEISHU_BASE_TOKEN`、`FEISHU_TABLE_ID`：需求任务表。
 - `FEISHU_RULES_TABLE_ID`：同一 Base 下的规则表。
 - `FEISHU_MEMBERS_TABLE_ID`：同一 Base 下的成员负荷表。
-- `FEISHU_PRODUCT_BASE_TOKEN`、`FEISHU_PRODUCT_TABLE_ID`：商品数据包分配表。
+- `FEISHU_PRODUCT_BASE_TOKEN`：两张年度数据包所在的 Base。
+- `FEISHU_PRODUCT_2026_TABLE_ID`、`FEISHU_PRODUCT_2027_TABLE_ID`：按优先顺序查询的年度数据包表。
 
 `.env` 使用简单键值，保存凭证、Base Token、表 ID、模型接口、超时重试及路径等运行参数，`.env.example` 提供模板。`config/recommendation.json` 的 `members` 保存昵称到用户 ID 的映射，`ownership_routes` 保存规则记录 ID 到 `product`、`shop` 或 `product_platform` 的映射；字段映射、名单及分配规则也在容器外 JSON 中维护，每次任务重新读取。修改 `.env` 后重建容器以加载新值。
 

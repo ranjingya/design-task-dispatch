@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import unicodedata
 from pathlib import Path
 
 from app.rules import load_score, plain
@@ -50,24 +51,47 @@ def workloads(records, mapping, members, exclude_id):
 
 
 def product_owner(demand, records, config):
-    """功能说明：按完整货号及拼款上下文定位归属。参数 demand：需求文本；records：分配记录；config：字段和提取规则。返回值：人员昵称或空值、说明、是否允许老款兜底。"""
+    """功能说明：按完整款号或唯一商品标题定位单表归属。参数 demand：需求文本；records：数据包记录；config：字段和提取规则。返回值：负责人或空、说明、是否允许老款兜底、是否已找到相关记录。"""
     text = ' '.join(plain(demand.get(k)) for k in ('title', 'description', 'platform', 'notes'))
     codes = set(re.findall(config['code_pattern'], text.upper()))
-    if not codes:
-        return None, '需求缺少可识别货号，请补充货号。', False
     bundle = bool(re.search(config['bundle_pattern'], text)) or len(codes) > 1
     matches = []
     for record in records:
         title = plain(record['fields'].get(config['title_field']))
         row_codes = set(re.findall(config['code_pattern'], title.upper()))
-        if codes <= row_codes:
+        if codes and codes <= row_codes:
             matches.append((record, title, row_codes))
-    if not matches:
-        old = bool(re.search(config['old_pattern'], text))
-        return None, '分配表未找到该货号归属。', old
-    selected = [r for r in matches if (len(r[2]) > 1) == bundle and r[2] == codes]
-    if not selected:
-        return None, '货号存在，但单款／拼款范围未能唯一对应，请补充完整组合。', False
+    if matches:
+        selected = [r for r in matches if (len(r[2]) > 1) == bundle and r[2] == codes]
+        if not selected:
+            return None, '货号存在，但单款／拼款范围未能唯一对应，请补充完整组合。', False, True
+        basis = '款号'
+    else:
+        def normalized(value):
+            """统一全半角、大小写、空格和标点，保留完整商品名称。"""
+            return ''.join(c for c in unicodedata.normalize('NFKC', value).casefold() if c.isalnum())
+
+        evidence = normalized(' '.join(plain(demand.get(k)) for k in ('title', 'description', 'notes')))
+        selected, titles = [], set()
+        for record in records:
+            title = plain(record['fields'].get(config['title_field']))
+            row_codes = set(re.findall(config['code_pattern'], title.upper()))
+            # 有明确款号时不以相同名称匹配另一个款号；无款号源记录允许完整名称补充匹配。
+            if codes and row_codes and row_codes != codes:
+                continue
+            name = normalized(re.sub(config['code_pattern'], '', title.upper()))
+            row_bundle = len(row_codes) > 1 or bool(re.search(config['bundle_pattern'], title))
+            if len(name) >= 3 and name in evidence and row_bundle == bundle:
+                if len(codes) > 1:
+                    continue
+                selected.append((record, title, row_codes))
+                titles.add(name)
+        if not selected:
+            old = bool(codes and re.search(config['old_pattern'], text))
+            return None, '数据包未找到对应款号或商品标题。', old, False
+        if len(titles) != 1:
+            return None, '商品标题命中多个不同商品，请补充明确款号或完整商品名。', False, True
+        basis = '商品标题'
     platform = plain(demand.get('platform'))
     applicable = []
     for row in selected:
@@ -76,11 +100,32 @@ def product_owner(demand, records, config):
             continue
         applicable.append(row)
     if not applicable:
-        return None, '分配记录有平台限制，需求平台尚未对应。', False
+        return None, '分配记录有平台限制，需求平台尚未对应。', False, True
     owners = {plain(r[0]['fields'].get(config['owner_field'])) for r in applicable}
     if len(owners) != 1 or not next(iter(owners)):
-        return None, '该货号存在不同认领人员或认领信息为空，需人工确认。', False
-    return owners.pop(), '商品归属记录：' + '、'.join(r[0]['record_id'] for r in applicable), False
+        return None, '匹配商品存在不同负责人或负责人为空，需人工确认。', False, True
+    return owners.pop(), f'按{basis}匹配；商品归属记录：' + '、'.join(r[0]['record_id'] for r in applicable), False, True
+
+
+def lookup_product_owner(demand, feishu, config):
+    """功能说明：按配置顺序查找年度数据包负责人。参数 demand：需求内容；feishu：数据客户端；config：商品匹配配置。返回值：负责人或空、说明、老款兜底标记、命中的来源名称；来源读取失败直接抛错。"""
+    sources = config.get('sources')
+    settings = feishu.settings
+    if not settings.product_base_token or not isinstance(sources, list) or not sources:
+        raise ValueError('请配置 FEISHU_PRODUCT_BASE_TOKEN 和数据包查询来源')
+    for source in sources:
+        if (not isinstance(source, dict) or not isinstance(source.get('label'), str)
+                or source.get('table_setting') not in ('product_2026_table_id', 'product_2027_table_id')
+                or not getattr(settings, source['table_setting'], '')):
+            raise ValueError('请配置 FEISHU_PRODUCT_2026_TABLE_ID、FEISHU_PRODUCT_2027_TABLE_ID 和来源名称')
+    fallback = False
+    for source in sources:
+        rows = feishu.get_records(getattr(settings, source['table_setting']), settings.product_base_token)
+        owner, reason, fallback, found = product_owner(demand, rows, config)
+        logger.info('商品归属查询 来源=%s 结果=%s', source['label'], '找到负责人' if owner else '待人工确认' if found else '未找到')
+        if found:
+            return owner, reason, False, source['label']
+    return None, '2026、2027 数据包均未找到对应款号或商品标题。', fallback, ''
 
 
 def shop_owner(demand, shops):
@@ -202,10 +247,8 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
             logger.debug('平台推荐策略：record_id=%s action=%s', record_id, policy['action'])
         if route not in ('product', 'product_platform'):
             return answer('该规则尚未配置归属查询路径，需人工确认')
-        if not settings.product_base_token or not settings.product_table_id:
-            raise ValueError('请配置 FEISHU_PRODUCT_BASE_TOKEN 和 FEISHU_PRODUCT_TABLE_ID')
         p = config['product']
-        owner, reason, fallback = product_owner(demand, feishu.get_records(settings.product_table_id, settings.product_base_token), p)
+        owner, reason, fallback, product_source = lookup_product_owner(demand, feishu, p)
         logger.debug('商品归属查询：record_id=%s detail=%s', record_id, reason)
         if owner in config['excluded_owners']:
             return answer(f'原认领人{owner}不在美工名单，由组长安排')
@@ -218,7 +261,8 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
             else:
                 text = ' '.join(plain(demand.get(k)) for k in ('title', 'description', 'platform', 'notes'))
                 codes = '、'.join(dict.fromkeys(re.findall(p['code_pattern'], text.upper())))
-                return answer(f"{plain(demand.get('platform'))} {codes}，沿用数据包认领人", names[owner],
+                label = codes or '商品标题匹配'
+                return answer(f"{plain(demand.get('platform'))} {label}，沿用{product_source}负责人", names[owner],
                               mode='对应人员', people=describe([owner]))
         elif policy or not fallback:
             return answer(reason)
