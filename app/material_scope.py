@@ -5,7 +5,9 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 from app.online_materials import document_links, parse_link
 from app.rules import plain
@@ -13,22 +15,50 @@ from app.rules import plain
 logger = logging.getLogger(__name__)
 
 
-def choose_rows(rows, demand, config):
-    """功能说明：按商品标识和未提交状态选择唯一批次。参数 rows：运营记录；demand：需求文字；config：字段配置。返回值：本次记录列表，无法唯一对应时抛错。"""
-    pending = [r for r in rows if not plain(r['fields'].get(config['owner_field']))
-               and r['fields'].get(config['submitted_field']) in (None, False, 0)]
+def calendar_date(value):
+    """将毫秒时间戳或日期文本转换为服务时区日期，无效日期抛错。"""
+    zone = ZoneInfo(os.getenv('TZ', 'Asia/Shanghai'))
+    try:
+        if type(value) in (int, float):
+            return datetime.fromtimestamp(value / 1000, zone).date()
+        if isinstance(value, str) and value.strip():
+            instant = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            return (instant if instant.tzinfo else instant.replace(tzinfo=zone)).astimezone(zone).date()
+    except (ValueError, OverflowError, OSError):
+        pass
+    raise ValueError('需求或运营记录日期缺失、格式无效，请明确关联记录')
+
+
+def choose_rows(rows, demand, config, demand_time):
+    """功能说明：按商品、规格与提交日期选择最新待提交批次。参数 rows：运营记录；demand：需求文字；config：字段配置；demand_time：需求系统创建时间。返回值：本次记录列表，无法唯一对应时抛错。"""
     selected = []
     for name in config['identity_fields']:
-        selected = [r for r in pending if len(plain(r['fields'].get(name))) >= 3
-                    and re.search(r'(?<![A-Za-z0-9])' + re.escape(plain(r['fields'][name])) + r'(?![A-Za-z0-9])', demand, re.I)]
+        selected = [r for r in rows if len(plain(r['fields'].get(name))) >= 3
+                    and re.search(r'(?<![A-Za-z0-9])(?:SKU[:：\s-]*)?' + re.escape(plain(r['fields'][name])) + r'(?![A-Za-z0-9])', demand, re.I)]
         if selected:
             break
     if not selected:
-        raise ValueError('未找到商品对应且负责人为空、尚未提交的运营记录，请明确关联记录')
-    batches = {tuple(plain(r['fields'].get(k)) if not isinstance(r['fields'].get(k), (int, float))
-                     else str(r['fields'][k]) for k in config['batch_fields']) for r in selected}
+        raise ValueError('未找到商品对应的运营记录，请明确关联记录')
+    for name in config.get('variant_fields', []):
+        variants = [r for r in selected if plain(r['fields'].get(name)) and plain(r['fields'][name]) in demand]
+        if variants:
+            selected = variants
+    submitted = calendar_date(demand_time)
+    date_field = config['date_field']
+    dated = [(r, calendar_date(r['fields'].get(date_field))) for r in selected]
+    dated = [(r, day) for r, day in dated if day <= submitted]
+    if not dated:
+        raise ValueError('商品运营记录均晚于需求提交日期，请明确关联记录')
+    latest = max(day for _, day in dated)
+    selected = [r for r, day in dated if day == latest
+                and not plain(r['fields'].get(config['owner_field']))
+                and r['fields'].get(config['submitted_field']) in (None, False, 0)]
+    if not selected:
+        raise ValueError('需求日期对应的最新批次已安排或已提交，请明确关联记录')
+    batches = {tuple(plain(r['fields'].get(k)) for k in config['batch_fields'] if k != date_field) for r in selected}
     if len(batches) != 1 or any(not value for batch in batches for value in batch):
         raise ValueError('同款运营记录存在多个批次或缺少批次信息，请明确关联记录')
+    logger.info('运营批次对应 需求日期=%s 运营日期=%s 范围=%d', submitted, latest, len(selected))
     return selected
 
 
@@ -75,7 +105,7 @@ def scope_links(record_id, fields, mapping, feishu):
             root = f'/bitable/v1/apps/{quote(base, safe="")}/tables/{quote(table, safe="")}'
             schema, more = feishu.material_list(root + '/fields', materials['max_base_fields'])
             names = {f['field_name'] for f in schema}
-            required = set(source['identity_fields'] + source['batch_fields'] + source['mirror_match_fields']
+            required = set(source['identity_fields'] + source['batch_fields'] + source['mirror_match_fields'] + source.get('variant_fields', [])
                            + [source['owner_field'], source['submitted_field']])
             if more or not required <= names:
                 raise ValueError('运营表字段不完整，请核对对应配置')
@@ -104,7 +134,7 @@ def scope_links(record_id, fields, mapping, feishu):
                     selected.extend(matches)
             else:
                 text = ' '.join(plain(fields.get(mapping.get(k))) for k in ('title', 'description'))
-                selected = choose_rows(rows, text, source)
+                selected = choose_rows(rows, text, source, feishu.get_record_created_time(record_id))
                 linked = []
                 for row in selected:
                     matches = [r for r in copies if signature(r) == signature(row)]

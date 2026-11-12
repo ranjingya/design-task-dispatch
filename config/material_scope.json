@@ -6,6 +6,8 @@
       "mirror_table_env": "FEISHU_CREATIVE_MIRROR_TABLE_ID",
       "link_field": "京东创意图",
       "identity_fields": ["sku", "款号", "品名"],
+      "variant_fields": ["规格"],
+      "date_field": "提交时间",
       "batch_fields": ["提交时间", "创意图要求"],
       "mirror_match_fields": ["sku", "款号", "品名", "创意图要求"],
       "owner_field": "负责人",

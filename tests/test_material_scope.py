@@ -15,18 +15,17 @@ CONFIG = json.loads((ROOT / 'config/material_scope.json').read_text())['sources'
 def row(identity, **values):
     """构造有商品标识和批次信息的运营记录。"""
     return {'record_id': identity, 'fields': {'sku': '123456', '款号': 'AB123', '品名': '示例商品',
-            '创意图要求': '修改卖点', '提交时间': 1000, **values}}
+            '创意图要求': '修改卖点', '提交时间': '2026-11-09', '规格': '蓝色S', **values}}
 
 
 def test_choose_only_pending_product_and_all_skus():
     records = [row('recOne'), row('recTwo', sku='234567'), row('recAssigned', 负责人='成员'),
                row('recSubmitted', 是否提交需求=True), row('recOther', 品名='其他商品')]
-    assert [r['record_id'] for r in choose_rows(records, '示例商品创意图', CONFIG)] == ['recOne', 'recTwo']
-    assert [r['record_id'] for r in choose_rows(records, 'SKU 234567 修改', CONFIG)] == ['recTwo']
+    assert [r['record_id'] for r in choose_rows(records, '示例商品创意图', CONFIG, '2026-11-12')] == ['recOne', 'recTwo']
+    assert [r['record_id'] for r in choose_rows(records, 'SKU 234567 修改', CONFIG, '2026-11-12')] == ['recTwo']
 
 
 @pytest.mark.parametrize('records,title', [
-    ([row('recOne'), row('recTwo', 提交时间=2000)], '示例商品'),
     ([row('recOne'), row('recTwo', 创意图要求='另一批要求')], '示例商品'),
     ([row('recOne', 提交时间=None)], '示例商品'),
     ([row('recOne')], 'AB1234'),
@@ -34,7 +33,7 @@ def test_choose_only_pending_product_and_all_skus():
 ])
 def test_ambiguous_or_ineligible_rows_require_confirmation(records, title):
     with pytest.raises(ValueError):
-        choose_rows(records, title, CONFIG)
+        choose_rows(records, title, CONFIG, '2026-11-12')
 
 
 @pytest.fixture
@@ -47,6 +46,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv(CONFIG['mirror_table_env'], 'tblMirror')
     feishu = Mock(spec=FeishuClient)
     feishu.settings = settings
+    feishu.get_record_created_time.return_value = 1794441600000
     schema = [{'field_name': name} for name in row('recOne')['fields']] + [
         {'field_name': '负责人'}, {'field_name': '是否提交需求'}]
     feishu.material_list.side_effect = lambda path, *args: (schema if path.endswith('/fields') else [row('recOne')], False)
@@ -91,3 +91,40 @@ def test_explicit_record_and_unconfigured_documents_keep_scope(client):
     value = 'https://kocotree.feishu.cn/base/source?table=tblSource&record=recExplicit'
     assert scope_links('recTask', {'资料': value}, {'document_link': '资料'}, client) == [value]
     client.material_list.assert_not_called()
+
+
+def test_latest_batch_respects_demand_date_and_variant():
+    records = [row('recOld'), row('recNew', 提交时间='2026-11-11'),
+               row('recOther', sku='234567', 规格='红色S', 提交时间='2026-11-11'),
+               row('recFuture', 提交时间='2026-11-13')]
+    assert choose_rows(records, '示例商品', CONFIG, '2026-11-10')[0]['record_id'] == 'recOld'
+    assert [r['record_id'] for r in choose_rows(records, '示例商品蓝色S', CONFIG, '2026-11-12')] == ['recNew']
+    assert [r['record_id'] for r in choose_rows(records, 'SKU234567', CONFIG, '2026-11-12')] == ['recOther']
+
+
+def test_latest_assigned_batch_does_not_fall_back_to_old_pending_batch():
+    records = [row('recOld'), row('recNew', 提交时间='2026-11-11', 负责人='成员')]
+    with pytest.raises(ValueError, match='已安排'):
+        choose_rows(records, '示例商品', CONFIG, '2026-11-12')
+
+
+@pytest.mark.parametrize('created', [None, '', True, '无效日期'])
+def test_invalid_demand_date_requires_confirmation(created):
+    with pytest.raises(ValueError, match='日期'):
+        choose_rows([row('recOne')], '示例商品', CONFIG, created)
+
+
+def test_future_only_rows_require_confirmation():
+    with pytest.raises(ValueError, match='晚于'):
+        choose_rows([row('recOne', 提交时间='2026-11-13')], '示例商品', CONFIG, '2026-11-12')
+
+
+def test_get_creation_time_uses_automatic_fields(client):
+    real = FeishuClient(client.settings)
+    real._access_token = Mock(return_value='token')
+    real._request = Mock(return_value={'data': {'record': {'created_time': 1794441600000}}})
+    assert real.get_record_created_time('recTask') == 1794441600000
+    assert real._request.call_args.kwargs['params'] == {'automatic_fields': 'true'}
+    real._request.return_value = {'data': {'record': {}}}
+    with pytest.raises(ValueError, match='创建时间'):
+        real.get_record_created_time('recTask')

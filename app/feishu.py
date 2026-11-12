@@ -123,6 +123,15 @@ class FeishuClient:
                              headers={"Authorization": f"Bearer {self._access_token()}"})
         return data["data"]["record"]["fields"]
 
+    def get_record_created_time(self, record_id: str) -> int:
+        """功能说明：读取系统创建时间作为需求提交日期。参数 record_id：需求记录ID。返回值：创建时间毫秒时间戳；缺失时抛错。"""
+        data = self._request("GET", self._record_path(record_id), params={"automatic_fields": "true"},
+                             headers={"Authorization": f"Bearer {self._access_token()}"})
+        value = data['data']['record'].get('created_time')
+        if type(value) is not int or value <= 0:
+            raise ValueError('需求创建时间不可用，请明确关联运营记录')
+        return value
+
     def update_record(self, record_id: str, fields: dict) -> None:
         """功能说明：回写记录。参数 record_id：记录 ID；fields：飞书字段名与字段值。返回值：无。"""
         logger.debug("回写飞书记录：record_id=%s field_count=%d", record_id, len(fields))
