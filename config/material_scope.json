@@ -1,0 +1,15 @@
+{
+  "sources": [
+    {
+      "base_token_env": "FEISHU_CREATIVE_BASE_TOKEN",
+      "table_id_env": "FEISHU_CREATIVE_TABLE_ID",
+      "mirror_table_env": "FEISHU_CREATIVE_MIRROR_TABLE_ID",
+      "link_field": "京东创意图",
+      "identity_fields": ["sku", "款号", "品名"],
+      "batch_fields": ["提交时间", "创意图要求"],
+      "mirror_match_fields": ["sku", "款号", "品名", "创意图要求"],
+      "owner_field": "负责人",
+      "submitted_field": "是否提交需求"
+    }
+  ]
+}

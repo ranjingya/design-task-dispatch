@@ -286,3 +286,11 @@ docker compose exec design-task-dispatch .venv/bin/python -m app.cli notify recX
 ```json
 {"event":"deadline_reminder","record_id":"recXXXXXXXX"}
 ```
+
+## 运营创意图记录对应
+
+`config/material_scope.json` 配置运营表字段及需求关联列，来源 Base、来源表和本 Base 内同步表分别由 `.env` 中 `FEISHU_CREATIVE_BASE_TOKEN`、`FEISHU_CREATIVE_TABLE_ID`、`FEISHU_CREATIVE_MIRROR_TABLE_ID` 提供。来源表需要提供带 table 参数的资料链接。
+
+已有明确关联时按关联记录读取。首次提交且没有关联时，依次按需求标题或说明中明确出现的 SKU、款号、品名筛选负责人为空、是否提交需求未勾选的记录。候选必须属于同一提交时间和同一制作要求；多个批次、缺少批次信息、同步表记录缺失或重复时在匹配结果中提示待确认，交由人工调整关联列。同步表通过 SKU、款号、品名及制作要求核对，程序不修改运营源表状态。
+
+确定范围后填写需求关联列，并将源记录 ID 保存到规则缓存目录的 `material_scopes/`。重跑复用已确定的记录，后续负责人、提交状态及同款新批次不影响原有范围；人工修改关联列后重新核对对应关系。AI 只读取本次记录的文字与附件，具体记录链接按其明确范围读取。配置随 config 目录挂载，缓存随现有持久卷保存。

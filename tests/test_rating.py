@@ -573,3 +573,15 @@ def test_failed_writeback_does_not_notify(feishu, monkeypatch):
     with pytest.raises(RuntimeError):
         process_record('recTest', MAPPING, feishu)
     notify.assert_not_called()
+
+
+def test_ambiguous_operating_rows_do_not_reach_ai(feishu, monkeypatch):
+    """运营记录对应不清时回写待确认，避免混用其他批次评级。"""
+    classify = Mock()
+    monkeypatch.setattr('app.dispatch.scope_links', Mock(side_effect=ValueError('存在多个批次')))
+    monkeypatch.setattr(AIClient, 'classify', classify)
+    process_record('recTest', MAPPING, feishu)
+    classify.assert_not_called()
+    fields = feishu.update_record.call_args.args[1]
+    assert fields['类别'] is None and fields['分数'] is None
+    assert '运营记录对应待确认' in fields['结果'] and '存在多个批次' in fields['结果']

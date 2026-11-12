@@ -9,6 +9,7 @@ from typing import Callable
 from app.departments import resolve_department
 from app.ai import AIClient
 from app.materials import collect_materials
+from app.material_scope import scope_links
 from app.config import Settings, load_fields
 from app.feishu import FeishuClient
 from app.rules import select_department, review, format_result, load_score
@@ -103,17 +104,23 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
             document_name = mapping.get("document_link")
             if document_name and schema.get(document_name, {}).get("type") != 15:
                 raise ValueError("需求文档链接需为超链接字段，请核对字段映射")
-            material = collect_materials(attachment_fields, fields.get(mapping.get("document_link")), record_id, feishu)
-            demand["materials"] = material.texts
-            demand["image_sources"] = material.image_sources
-            # 在线资料读取缺口显式传入；已跳过的附件不参与评级。
-            demand["material_issues"] = material.issues
-            text_size, image_count = material.text_size, len(material.images)
-            logger.info("需求就绪 部门=%s 规则=%d 图片=%d 文档文字=%d", department, len(eligible), image_count, text_size)
-            task_details(stage="AI评级")
-            ai_started = time.monotonic()
-            result = AIClient(feishu.settings).classify(demand, eligible, options, material.images, department, material=material)
-            ai_elapsed = time.monotonic() - ai_started
+            try:
+                links = scope_links(record_id, fields, mapping, feishu)
+            except ValueError as exc:
+                logger.warning("运营记录对应待确认 原因=%s", exc)
+                result = review("运营记录对应待确认", [str(exc)], department)
+            else:
+                material = collect_materials(attachment_fields, links, record_id, feishu)
+                demand["materials"] = material.texts
+                demand["image_sources"] = material.image_sources
+                # 在线资料读取缺口显式传入；已跳过的附件不参与评级。
+                demand["material_issues"] = material.issues
+                text_size, image_count = material.text_size, len(material.images)
+                logger.info("需求就绪 部门=%s 规则=%d 图片=%d 文档文字=%d", department, len(eligible), image_count, text_size)
+                task_details(stage="AI评级")
+                ai_started = time.monotonic()
+                result = AIClient(feishu.settings).classify(demand, eligible, options, material.images, department, material=material)
+                ai_elapsed = time.monotonic() - ai_started
         if department is None or missing:
             logger.info("需求就绪 部门=%s 规则=%d 图片=0 文档文字=0", department or "未知", len(eligible))
         score = None
