@@ -59,7 +59,7 @@ def test_bind_then_reuse_after_status_and_batch_changes(client):
     mapping = {'title': '标题', 'description': '说明', 'document_link': '资料'}
     expected = ['https://kocotree.feishu.cn/base/source?table=tblSource&record=recOne']
     assert scope_links('recTask', fields, mapping, client) == expected
-    client.update_record.assert_called_once_with('recTask', {'京东创意图': [{'record_ids': ['recMirror'], 'text': '示例商品'}]})
+    client.update_record.assert_called_once_with('recTask', {'京东创意图': ['recMirror']})
     client.material_list.reset_mock()
     assert scope_links('recTask', fields, mapping, client) == expected
     client.material_list.assert_not_called()
