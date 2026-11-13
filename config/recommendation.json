@@ -13,7 +13,7 @@
   "product": {
     "title_field": "货号+品名",
     "owner_field": "负责人",
-    "code_pattern": "(?<![A-Z0-9])[A-Z]{1,5}[0-9]{4,12}(?![A-Z0-9])",
+    "code_pattern": "(?<![A-Z0-9])KQ[0-9]{4,12}(?![A-Z0-9])",
     "bundle_pattern": "拼款|组合款",
     "old_pattern": "老款|旧款",
     "platform_aliases": [

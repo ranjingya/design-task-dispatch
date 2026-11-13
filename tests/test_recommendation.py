@@ -79,6 +79,20 @@ def test_name_matching_does_not_treat_single_product_as_bundle():
     assert product_owner({'title': 'XX12345+XX12346 小晴天防晒帽'}, records, P)[0] is None
 
 
+@pytest.mark.parametrize('title,basis', [
+    ('kq54321 创意图 SKU100000000001', '款号'),
+    ('KQ54321 创意图 SKU100000000001', '款号'),
+    ('测试商品创意图 SKU100000000001', '商品标题'),
+])
+def test_business_product_code_ignores_sku(title, basis):
+    """功能说明：验证业务款号与商品名匹配可处理含SKU的需求。参数 title：需求标题；basis：预期匹配依据。返回值：无。"""
+    config = json.loads((ROOT / 'config/recommendation.json').read_text())['product']
+    records = [row('p', **{config['title_field']: 'KQ54321 测试商品', config['owner_field']: '甲'})]
+    owner, reason, _, found = product_owner({'title': title}, records, config)
+    assert owner == '甲' and found
+    assert f'按{basis}匹配' in reason
+
+
 def test_shop_requires_unique_department_and_store():
     shops = [{'department': '部门甲', 'aliases': ['店铺一']}, {'department': '部门甲', 'aliases': ['店铺二']}]
     assert shop_owner({'department': '部门甲', 'platform': '店铺一'}, shops) == shops[0]
