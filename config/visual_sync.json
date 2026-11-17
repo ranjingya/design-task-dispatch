@@ -1,0 +1,15 @@
+{
+  "chat": "oc_efc860b1307ac3db36ec2e2778c61929",
+  "table": "tblwEqsSuO7xpEY3",
+  "always_mention": "ou_374ce703f935fa872095a345e4cbf990",
+  "conditional_mention": "ou_dd5bb17a47efa5688bea543db2b234e5",
+  "platform": "全平台",
+  "code_pattern": "(?<![a-zA-Z0-9])[a-zA-Z]{1,6}[0-9]{4,12}(?![a-zA-Z0-9])",
+  "new_pattern": "数据包.{0,4}(?:已完成|制作完成)|上新",
+  "change_pattern": "更改|修改|改为|改成|改动|更新|调整|替换|更换|去掉|去除|删除|移除|加赠品|补齐|补充|新增|增加|添加|补加|优化",
+  "negative_pattern": "不用改|无需修改|不需要改|不用修改|需要.{0,8}[吗么？?]|(?:修改|更新|上新).{0,4}[吗么？?]",
+  "fields": {
+    "code": "货号", "name": "品名", "body": "修改信息", "kind": "需求类型",
+    "owner": "负责人", "platform": "同步平台", "sender": "视觉设计", "date": "发布时间"
+  }
+}

@@ -132,17 +132,26 @@ class FeishuClient:
             raise ValueError('需求创建时间不可用，请明确关联运营记录')
         return value
 
+    def create_visual_record(self, table_id, fields, client_token):
+        """功能说明：幂等新增视觉需求。参数 table_id：目标表；fields：记录字段；client_token：本款处理标识。返回值：飞书记录 ID。"""
+        path = f"/bitable/v1/apps/{self.settings.base_token}/tables/{table_id}/records"
+        result = self._request("POST", path, params={"client_token": client_token}, json={"fields": fields},
+                               headers={"Authorization": f"Bearer {self._access_token()}"})
+        return result["data"]["record"]["record_id"]
+
     def update_record(self, record_id: str, fields: dict) -> None:
         """功能说明：回写记录。参数 record_id：记录 ID；fields：飞书字段名与字段值。返回值：无。"""
         logger.debug("回写飞书记录：record_id=%s field_count=%d", record_id, len(fields))
         self._request("PUT", self._record_path(record_id), json={"fields": fields},
                       headers={"Authorization": f"Bearer {self._access_token()}"})
 
-    def _list_all(self, table_id: str, resource: str, base_token: str | None = None) -> list[dict]:
-        """功能说明：完整读取分页资源。参数 table_id：表 ID；resource：fields 或 records；base_token：可选来源 Base。返回值：全部项目列表。"""
+    def _list_all(self, table_id: str, resource: str, base_token: str | None = None, fields=None) -> list[dict]:
+        """功能说明：完整读取分页资源。参数 table_id：表 ID；resource：fields 或 records；base_token：可选来源 Base；fields：可选记录字段列表。返回值：全部项目列表。"""
         path = f"/bitable/v1/apps/{quote(base_token or self.settings.base_token, safe='')}/tables/{quote(table_id, safe='')}/{resource}"
         items, seen = [], set()
         params = {"page_size": 100}
+        if fields:
+            params["field_names"] = json.dumps(fields, ensure_ascii=False)
         while True:
             data = self._request("GET", path, params=params,
                                  headers={"Authorization": f"Bearer {self._access_token()}"})["data"]
@@ -155,9 +164,9 @@ class FeishuClient:
             seen.add(token)
             params["page_token"] = token
 
-    def get_records(self, table_id: str, base_token: str | None = None) -> list[dict]:
-        """功能说明：读取完整业务记录。参数 table_id：来源表；base_token：可选跨 Base 来源。返回值：含记录 ID 和字段的列表。"""
-        records = self._list_all(table_id, "records", base_token)
+    def get_records(self, table_id: str, base_token: str | None = None, fields=None) -> list[dict]:
+        """功能说明：读取完整业务记录。参数 table_id：来源表；base_token：可选跨 Base 来源；fields：可选字段列表。返回值：含记录 ID 和字段的列表。"""
+        records = self._list_all(table_id, "records", base_token, fields)
         logger.debug("业务记录加载完成：table_id=%s count=%d", table_id, len(records))
         return records
 

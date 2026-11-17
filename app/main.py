@@ -3,6 +3,7 @@
 import atexit
 import hmac
 import logging
+import os
 import re
 
 from flask import Flask, jsonify, request
@@ -29,6 +30,9 @@ def create_app(settings: Settings | None = None, dispatcher=None) -> Flask:
     app.extensions["dispatcher"] = dispatcher
     if owned:
         atexit.register(dispatcher.close)
+        if os.getenv("VISUAL_SYNC_ENABLED") == "1":
+            from app.visual_sync import start_visual_sync
+            atexit.register(start_visual_sync(settings))
 
     @app.get("/health")
     def health():
