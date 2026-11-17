@@ -139,6 +139,40 @@ def send_new_task(record_id, mapping, feishu):
     return deliver(record_id, mapping, feishu, recipients, "new_task")
 
 
+def send_error(record_id, stage, error, feishu, title=None):
+    """功能说明：向配置人员发送报错卡片，通知失败仅记录日志。参数 record_id：需求记录 ID；stage：失败环节；error：原始异常；feishu：数据客户端；title：已读取的任务名称，缺失时显示记录 ID。返回值：通知成功或未启用时为真，发送失败时为假。"""
+    try:
+        settings = feishu.settings
+        config = load_notifications(settings.fields_path.parent / "notifications.toml", "error")
+        recipients = [p for p in config.get("recipients", []) if p["enabled"]]
+        if not recipients:
+            return True
+        reason = f"{type(error).__name__}: {error}"
+        for secret in (settings.app_secret, settings.alert_app_secret, settings.webhook_token, settings.ai_key):
+            if secret:
+                reason = reason.replace(secret, "[已隐藏]")
+        reason = " ".join(reason.split())[:500]
+        text = "\n".join([
+            f"**任务名称：** {escape_text(title) or escape_text(record_id)}",
+            f"**失败环节：** {escape_text(stage)}",
+            f"**失败原因：** {escape_text(reason)}",
+        ])
+        url = (f"https://feishu.cn/base/{quote(settings.base_token, safe='')}"
+               f"?table={quote(settings.table_id, safe='')}&record={quote(record_id, safe='')}")
+        content = {"schema": "2.0", "config": {"width_mode": "default"},
+                   "header": {"title": {"tag": "plain_text", "content": "美工任务 · 处理异常"}, "template": "red"},
+                   "body": {"direction": "vertical", "vertical_spacing": "12px", "elements": [
+                       {"tag": "markdown", "content": text},
+                       {"tag": "button", "text": {"tag": "plain_text", "content": "查看需求"}, "type": "default",
+                        "behaviors": [{"type": "open_url", "default_url": url}]},
+                   ]}}
+        # 每次失败独立通知，单次发送内沿用原有消息去重与网络重试。
+        return deliver(record_id, {}, feishu, recipients, "error", version=str(time.time_ns()), content=content)
+    except Exception as exc:
+        logger.warning("报错通知失败 原因=%s", exc)
+        return False
+
+
 def alert_open_id(source_id, feishu, bot):
     """功能说明：解析通知应用下的人员身份。参数 source_id：数据应用 Open ID；feishu：数据客户端；bot：通知客户端。返回值：通知应用 Open ID。"""
     if feishu.settings.app_id == bot.settings.app_id:
@@ -211,8 +245,8 @@ def notify_record(record_id, event, mapping, feishu):
     return "sent_or_duplicate"
 
 
-def deliver(record_id, mapping, feishu, recipients, event, fields=None, version=""):
-    """功能说明：按接收人持久化去重并发送卡片。参数 record_id：记录 ID；mapping：字段映射；feishu：数据客户端；recipients：接收人；event：事件；fields：可选记录快照；version：通知版本。返回值：是否全部成功。"""
+def deliver(record_id, mapping, feishu, recipients, event, fields=None, version="", content=None):
+    """功能说明：按接收人持久化去重并发送卡片。参数 record_id：记录 ID；mapping：字段映射；feishu：数据客户端；recipients：接收人；event：事件；fields：可选记录快照；version：通知版本；content：可选的预生成卡片。返回值：是否全部成功。"""
     settings = feishu.settings
     if not settings.alert_app_id or not settings.alert_app_secret:
         raise ValueError("请配置 FEISHU_ALERT_APP_ID 和 FEISHU_ALERT_APP_SECRET")
@@ -220,7 +254,6 @@ def deliver(record_id, mapping, feishu, recipients, event, fields=None, version=
     folder = settings.rules_cache_path.parent / "notifications"
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
     success = True
-    content = None
     for person in recipients:
         # 按应用、表、记录和接收人去重；锁覆盖发送与落盘，供后台和 CLI 共用。
         identity = [settings.alert_app_id, settings.base_token, settings.table_id, record_id, person["open_id"], event]

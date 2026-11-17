@@ -11,7 +11,7 @@ import pytest
 
 from app.config import Settings
 from app.feishu import FeishuClient
-from app.notifications import deadline_date, load_notifications, notification_content, notify_record, send_new_task
+from app.notifications import deadline_date, load_notifications, notification_content, notify_record, send_error, send_new_task
 
 MAPPING = {key: key for key in ['title', 'description', 'submitter', 'department', 'platform',
                               'recommended_assignee', 'work_type', 'level', 'load_score',
@@ -103,6 +103,82 @@ def test_disabled_config_never_reads_record(client, monkeypatch):
     path = client.settings.fields_path.parent / 'notifications.toml'
     path.write_text('[new_task]\nenabled = false\n')
     assert send_new_task('recTest', MAPPING, client)
+    client.get_record.assert_not_called()
+
+
+@pytest.fixture
+def error_client(client):
+    """为报错通知配置独立接收人，隔离已有新增通知名单。"""
+    path = client.settings.fields_path.parent / 'notifications.toml'
+    path.write_text(path.read_text() + '''
+[error]
+enabled = true
+[[error.recipients]]
+name = "报错接收人"
+open_id = "ou_error"
+enabled = true
+[[error.recipients]]
+name = "未启用人员"
+open_id = "ou_disabled"
+enabled = false
+''')
+    return client
+
+
+def test_error_notification_uses_private_recipients_and_redacted_context(error_client, monkeypatch):
+    """异常只发给报错名单，保留环节与链接，隐藏凭证并转义输入。"""
+    client = error_client
+    client.settings = replace(client.settings, ai_key='model-key')
+    send = Mock(return_value='om_error')
+    monkeypatch.setattr(FeishuClient, 'send_card', send)
+    error = RuntimeError('data-secret alert-secret token model-key <at id=all></at>\n额外说明')
+    assert send_error('recFailure', '读取材料', error, client, title='测试需求')
+    assert [call.args[0] for call in send.call_args_list] == ['ou_error']
+    card = send.call_args.args[1]
+    assert card['header']['template'] == 'red'
+    body = card['body']['elements'][0]['content']
+    assert '测试需求' in body and '读取材料' in body and 'RuntimeError' in body
+    assert len(body.splitlines()) == 3
+    assert '<at id=all>' not in body and '&lt;at id=all&gt;' in body
+    for secret in ('data-secret', 'alert-secret', 'token', 'model-key'):
+        assert secret not in body
+    assert 'record=recFailure' in card['body']['elements'][1]['behaviors'][0]['default_url']
+    client.get_record.assert_not_called()
+    client.update_record.assert_not_called()
+
+
+def test_each_failed_attempt_can_notify_and_missing_title_uses_record_id(error_client, monkeypatch):
+    """同一任务再次失败仍通知，每次发送使用独立且可重试的消息标识。"""
+    send = Mock(return_value='om_error')
+    monkeypatch.setattr(FeishuClient, 'send_card', send)
+    for _ in range(2):
+        assert send_error('recFailure', '读取记录', RuntimeError('读取失败'), error_client)
+    assert send.call_count == 2
+    assert send.call_args_list[0].args[2] != send.call_args_list[1].args[2]
+    assert 'recFailure' in send.call_args.args[1]['body']['elements'][0]['content']
+    error_client.get_record.assert_not_called()
+
+
+def test_error_notification_failure_is_best_effort(error_client, monkeypatch, caplog):
+    """报错消息发送失败只记录一次失败，不递归通知或覆盖任务。"""
+    send = Mock(side_effect=RuntimeError('网络失败'))
+    monkeypatch.setattr(FeishuClient, 'send_card', send)
+    assert not send_error('recFailure', '读取材料', ValueError('材料错误'), error_client)
+    assert send.call_count == 1
+    assert '通知失败 事件=error' in caplog.text
+    error_client.get_record.assert_not_called()
+    error_client.update_record.assert_not_called()
+
+
+def test_error_notification_disabled_or_missing_never_sends(client, monkeypatch):
+    """缺少报错配置或关闭报错通知时，不读取任务或发送消息。"""
+    send = Mock()
+    monkeypatch.setattr(FeishuClient, 'send_card', send)
+    assert send_error('recFailure', '读取记录', RuntimeError('失败'), client)
+    path = client.settings.fields_path.parent / 'notifications.toml'
+    path.write_text('[error]\nenabled = false\n')
+    assert send_error('recFailure', '读取记录', RuntimeError('失败'), client)
+    send.assert_not_called()
     client.get_record.assert_not_called()
 
 

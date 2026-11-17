@@ -54,8 +54,14 @@ def client(tmp_path, monkeypatch):
     return feishu
 
 
-def test_bind_then_reuse_after_status_and_batch_changes(client):
-    fields = {'标题': '示例商品', '资料': 'https://kocotree.feishu.cn/base/source?table=tblSource'}
+@pytest.mark.parametrize('refs', [
+    None, [], [{'record_ids': None, 'text': None}], [{'record_ids': []}],
+    [{'id': None, 'record_id': None}],
+])
+def test_bind_then_reuse_after_status_and_batch_changes(client, refs):
+    """空关联进入自动匹配，关联回填后重跑复用同一批次。"""
+    fields = {'标题': '示例商品', '资料': 'https://kocotree.feishu.cn/base/source?table=tblSource',
+              '京东创意图': refs}
     mapping = {'title': '标题', 'description': '说明', 'document_link': '资料'}
     expected = ['https://kocotree.feishu.cn/base/source?table=tblSource&record=recOne']
     assert scope_links('recTask', fields, mapping, client) == expected
@@ -66,16 +72,46 @@ def test_bind_then_reuse_after_status_and_batch_changes(client):
     client.update_record.assert_called_once()
 
 
-def test_existing_links_work_after_assignment_and_manual_change_invalidates_cache(client):
+@pytest.mark.parametrize('refs', [
+    ['recMirror'], [{'record_ids': ['recMirror'], 'text': '示例商品'}],
+    [{'id': 'recMirror'}], [{'record_id': 'recMirror'}],
+    [{'record_ids': None, 'id': 'recMirror'}],
+])
+def test_existing_links_work_after_assignment_and_manual_change_invalidates_cache(client, refs):
+    """有效关联保留原记录，人工改动关联后重新核对范围。"""
     client.material_list.side_effect = lambda path, *args: ([{'field_name': k} for k in
         [*row('recOne')['fields'], '负责人', '是否提交需求']] if path.endswith('/fields') else
         [row('recOne', 负责人='成员', 是否提交需求=True)], False)
-    fields = {'资料': 'https://kocotree.feishu.cn/base/source?table=tblSource', '京东创意图': [{'record_ids': ['recMirror'], 'text': '示例商品'}]}
+    fields = {'资料': 'https://kocotree.feishu.cn/base/source?table=tblSource', '京东创意图': refs}
     assert 'record=recOne' in scope_links('recTask', fields, {'document_link': '资料'}, client)[0]
     client.update_record.assert_not_called()
     fields['京东创意图'] = ['recMissing']
     with pytest.raises(ValueError, match='不存在'):
         scope_links('recTask', fields, {'document_link': '资料'}, client)
+
+
+@pytest.mark.parametrize('ids', [123, 'recMirror', [None], ['invalid']])
+def test_malformed_links_require_confirmation_without_rebinding(client, ids):
+    """异常关联值提示人工核对，避免按空关联重新选择材料。"""
+    fields = {'标题': '示例商品', '资料': 'https://kocotree.feishu.cn/base/source?table=tblSource',
+              '京东创意图': [{'record_ids': ids}]}
+    with pytest.raises(ValueError, match='关联记录格式无效'):
+        scope_links('recTask', fields, {'title': '标题', 'document_link': '资料'}, client)
+    client.update_record.assert_not_called()
+    client.material_list.assert_not_called()
+
+
+def test_empty_link_with_ambiguous_batch_never_binds(client):
+    """空关联仍需唯一匹配批次，多批候选保持待确认且不回填。"""
+    original_list = client.material_list.side_effect
+    records = [row('recOne'), row('recTwo', 创意图要求='另一批要求')]
+    client.material_list.side_effect = lambda path, *args: (
+        (records, False) if path.endswith('/records') else original_list(path, *args))
+    fields = {'标题': '示例商品', '资料': 'https://kocotree.feishu.cn/base/source?table=tblSource',
+              '京东创意图': [{'record_ids': None, 'text': None}]}
+    with pytest.raises(ValueError, match='多个批次'):
+        scope_links('recTask', fields, {'title': '标题', 'document_link': '资料'}, client)
+    client.update_record.assert_not_called()
 
 
 def test_missing_mirror_never_writes_or_binds(client):

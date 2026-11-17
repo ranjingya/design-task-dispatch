@@ -12,9 +12,9 @@ from app.materials import collect_materials
 from app.material_scope import scope_links
 from app.config import Settings, load_fields
 from app.feishu import FeishuClient
-from app.rules import select_department, review, format_result, load_score
+from app.rules import select_department, review, format_result, load_score, plain
 from app.rule_cache import load_daily_rules
-from app.notifications import send_new_task
+from app.notifications import send_error, send_new_task
 from app.recommendation import protected, recommend, save_rotation, format_recommendation
 
 from app.task_logging import task_context, task_details
@@ -67,6 +67,7 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
     try:
         task_details(stage="读取记录")
         fields = feishu.get_record(record_id)
+        task_details(title=plain(fields.get(mapping.get("title"))))
         if recommending and protected(fields, mapping):
             task_details(outcome="跳过：已有人工安排或任务已结束")
             return
@@ -140,9 +141,10 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
             try:
                 recommendation, pending = recommend(record_id, fields, demand, rule, mapping, feishu)
                 updates.update(recommendation)
-            except Exception:
+            except Exception as exc:
                 task_details(recommended="人工分配")
                 logger.exception("人员推荐失败，转人工分配")
+                send_error(record_id, "人员推荐", exc, feishu, title=plain(fields.get(mapping.get("title"))))
                 updates.update({mapping['recommendation_result']: format_recommendation('人工分配', '资源读取或配置校验失败，请重试', '人员负载暂不可用', score),
                                 mapping['recommended_assignee']: []})
             # 模型运行期间可能有人确认，回写前再次检查人工安排。
@@ -158,8 +160,10 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
         task_details(outcome="回写成功")
         try:
             save_rotation(pending)
-        except Exception:
+        except Exception as exc:
             logger.exception("轮换位置保存失败，推荐已回写")
+            send_error(record_id, "保存轮换位置（结果已回写）", exc, feishu,
+                       title=plain(fields.get(mapping.get("title"))))
     except Exception:
         try:
             feishu.update_record(record_id, {result_name: "处理失败：读取材料、调用模型或校验结果失败，请查看服务日志并重新触发。"})
@@ -173,9 +177,12 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
         try:
             if not send_new_task(record_id, mapping, feishu):
                 task_details(outcome="回写成功，通知待补发")
+                send_error(record_id, "新增通知", RuntimeError("新增通知未全部发送成功，可重试通知"), feishu,
+                           title=plain(fields.get(mapping.get("title"))))
         except Exception as exc:
             task_details(outcome="回写成功，通知待补发")
             logger.warning("新增通知失败 原因=%s", exc)
+            send_error(record_id, "新增通知", exc, feishu, title=plain(fields.get(mapping.get("title"))))
 
 
 class Dispatcher:
@@ -218,8 +225,10 @@ class Dispatcher:
         try:
             self.runner(record_id, mapping, self.feishu)
             success = True
-        except Exception:
+        except Exception as exc:
             logger.exception("任务失败 阶段=%s 总耗时=%.2fs", task_context.get()["stage"], time.monotonic() - started)
+            details = task_context.get()
+            send_error(record_id, details["stage"], exc, self.feishu, title=details.get("title"))
         finally:
             with self._lock:
                 self._active.discard(record_id)

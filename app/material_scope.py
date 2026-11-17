@@ -91,10 +91,19 @@ def scope_links(record_id, fields, mapping, feishu):
         refs = fields.get(source['link_field']) or []
         linked = []
         for ref in refs:
-            linked.extend(ref.get('record_ids', [ref.get('id') or ref.get('record_id')])
-                          if isinstance(ref, dict) else [ref])
+            if isinstance(ref, dict):
+                ids = ref.get('record_ids')
+                if ids is None:
+                    rid = ref.get('id') or ref.get('record_id')
+                    ids = [rid] if rid else []
+                if not isinstance(ids, list):
+                    raise ValueError('需求关联记录格式无效，请核对关联列')
+                linked.extend(ids)
+            else:
+                linked.append(ref)
         if any(not isinstance(rid, str) or not re.fullmatch(r'rec[A-Za-z0-9]+', rid) for rid in linked):
             raise ValueError('需求关联记录格式无效，请核对关联列')
+        had_links = bool(linked)
         saved = json.loads(snapshot.read_text()) if snapshot.exists() else None
         if saved and linked == saved['linked_records']:
             ids = saved['records']
@@ -149,7 +158,7 @@ def scope_links(record_id, fields, mapping, feishu):
             temporary.write_text(json.dumps({'records': ids, 'linked_records': linked}))
             temporary.chmod(0o600)
             temporary.replace(snapshot)
-            logger.info('运营记录对应 方式=%s 范围=%d', '已有明确关联' if refs else '待提交批次', len(ids))
+            logger.info('运营记录对应 方式=%s 范围=%d', '已有明确关联' if had_links else '待提交批次', len(ids))
         # 多条具体记录链接共用原有材料限额，避免整表图片进入模型。
         prefix = link.split('?', 1)[0]
         result.extend(f'{prefix}?table={table}&record={rid}' for rid in ids)

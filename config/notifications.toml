@@ -31,3 +31,12 @@ recipient_field = "creator"
 [deadline_reminder]
 enabled = true
 recipient_field = "assignee"
+
+# 任务处理与流程通知报错时私聊指定人员。
+[error]
+enabled = true
+
+[[error.recipients]]
+name = "鸭腿"
+open_id = "ou_cf378d4610826e6dc9deb27a2d212ce2"
+enabled = true

@@ -8,7 +8,7 @@ import re
 from flask import Flask, jsonify, request
 
 from app.config import Settings, load_fields
-from app.notifications import RECORD_NOTIFICATION_EVENTS, notify_record
+from app.notifications import RECORD_NOTIFICATION_EVENTS, notify_record, send_error
 from app.feishu import FeishuClient
 from app.dispatch import Dispatcher
 from app.task_logging import configure_logging
@@ -48,8 +48,9 @@ def create_app(settings: Settings | None = None, dispatcher=None) -> Flask:
             return jsonify(error="record_id 必须是有效的飞书记录 ID"), 400
         try:
             accepted = dispatcher.submit(record_id)
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError) as exc:
             logger.exception("任务接收失败：record_id=%s", record_id)
+            send_error(record_id, "接收需求", exc, FeishuClient(settings))
             return jsonify(error="服务配置异常或繁忙，请查看日志后重试"), 503
         return jsonify(status="accepted" if accepted else "duplicate", record_id=record_id), (202 if accepted else 200)
 
@@ -71,8 +72,11 @@ def create_app(settings: Settings | None = None, dispatcher=None) -> Flask:
             status = notify_record(record_id, event, load_fields(settings.fields_path), FeishuClient(settings))
             logger.info("流程通知 事件=%s record=%s 结果=%s", event, record_id, status)
             return jsonify(status=status, record_id=record_id, event=event)
-        except Exception:
+        except Exception as exc:
             logger.exception("流程通知失败 事件=%s record=%s", event, record_id)
+            stage = {"leader_confirmed": "组长确认通知", "assignee_confirmed": "负责人确认通知",
+                     "deadline_reminder": "截止日期提醒"}[event]
+            send_error(record_id, stage, exc, FeishuClient(settings))
             return jsonify(error="通知失败，请查看日志并重试"), 503
 
     logger.info("Flask 服务初始化完成")

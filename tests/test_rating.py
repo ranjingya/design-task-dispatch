@@ -390,6 +390,9 @@ def test_recommendation_integrates_single_write(feishu, monkeypatch):
 
 
 def test_recommendation_failure_preserves_rating_and_clears_old_recommendation(feishu, monkeypatch):
+    """推荐读取失败转人工，同时报错通知，已得到的评级仍正常回写。"""
+    report = Mock(return_value=True)
+    monkeypatch.setattr('app.dispatch.send_error', report)
     mapping = MAPPING | {'recommendation_result': '推荐结果', 'recommended_assignee': '推荐人'}
     feishu.get_fields.return_value = SCHEMA + [{'field_name': '推荐结果', 'type': 1}, {'field_name': '推荐人', 'type': 11}]
     monkeypatch.setattr(AIClient, 'classify', Mock(return_value=RATED))
@@ -397,6 +400,7 @@ def test_recommendation_failure_preserves_rating_and_clears_old_recommendation(f
     process_record('recTest', mapping, feishu)
     updates = feishu.update_record.call_args.args[1]
     assert updates['分数'] == 2 and updates['推荐人'] == [] and updates['推荐结果'] == '人工分配\n\n资源读取或配置校验失败，请重试\n\n人员负载暂不可用\n\n本任务 2 分'
+    assert report.call_args.args[:2] == ('recTest', '人员推荐')
 
 
 def test_compact_match_adjustment_and_duplicate_candidates():
@@ -551,6 +555,9 @@ def test_normal_task_has_four_summary_lines(feishu, monkeypatch, caplog):
 
 
 def test_notification_follows_writeback_and_failure_preserves_result(feishu, monkeypatch):
+    """新增通知失败时保留回写结果，并通知维护人员核对。"""
+    report = Mock(return_value=True)
+    monkeypatch.setattr('app.dispatch.send_error', report)
     mapping = MAPPING | {'recommendation_result': '推荐结果', 'recommended_assignee': '推荐人'}
     feishu.get_fields.return_value = SCHEMA + [{'field_name': '推荐结果', 'type': 1}, {'field_name': '推荐人', 'type': 11}]
     monkeypatch.setattr(AIClient, 'classify', Mock(return_value=RATED))
@@ -563,6 +570,8 @@ def test_notification_follows_writeback_and_failure_preserves_result(feishu, mon
     process_record('recTest', mapping, feishu)
     assert feishu.update_record.call_count == 1
     assert feishu.update_record.call_args.args[1]['结果'].startswith('已匹配')
+    assert report.call_args.args[:2] == ('recTest', '新增通知')
+    assert report.call_args.kwargs['title'] == '测试'
 
 
 def test_failed_writeback_does_not_notify(feishu, monkeypatch):
@@ -578,6 +587,8 @@ def test_failed_writeback_does_not_notify(feishu, monkeypatch):
 def test_ambiguous_operating_rows_do_not_reach_ai(feishu, monkeypatch):
     """运营记录对应不清时回写待确认，避免混用其他批次评级。"""
     classify = Mock()
+    report = Mock(return_value=True)
+    monkeypatch.setattr('app.dispatch.send_error', report)
     monkeypatch.setattr('app.dispatch.scope_links', Mock(side_effect=ValueError('存在多个批次')))
     monkeypatch.setattr(AIClient, 'classify', classify)
     process_record('recTest', MAPPING, feishu)
@@ -585,3 +596,4 @@ def test_ambiguous_operating_rows_do_not_reach_ai(feishu, monkeypatch):
     fields = feishu.update_record.call_args.args[1]
     assert fields['类别'] is None and fields['分数'] is None
     assert '运营记录对应待确认' in fields['结果'] and '存在多个批次' in fields['结果']
+    report.assert_not_called()

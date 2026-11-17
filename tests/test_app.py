@@ -34,7 +34,10 @@ def test_webhook_auth_and_validation(settings):
     assert client.post("/webhook/task", json={"record_id": "rec123"}, headers=headers).status_code == 200
 
 
-def test_invalid_config_returns_retryable_response(settings):
+def test_invalid_config_returns_retryable_response(settings, monkeypatch):
+    """接收失败保留可重试响应，并报告原始异常。"""
+    report = Mock(return_value=True)
+    monkeypatch.setattr('app.main.send_error', report)
     dispatcher = Dispatcher(settings, runner=Mock())
     try:
         client = create_app(settings, dispatcher).test_client()
@@ -43,6 +46,7 @@ def test_invalid_config_returns_retryable_response(settings):
                                headers={"X-Webhook-Token": "test-token"})
         assert response.status_code == 503
         dispatcher.runner.assert_not_called()
+        assert report.call_args.args[:2] == ('rec123', '接收需求')
     finally:
         dispatcher.close()
 
@@ -88,8 +92,11 @@ def test_failed_record_can_be_retried(settings):
 
 
 def test_notification_endpoint_validation_and_failure(settings, monkeypatch):
+    """只对真实流程异常发送报错通知，鉴权和参数错误沿用接口校验。"""
     notify = Mock(return_value='sent_or_duplicate')
     monkeypatch.setattr('app.main.notify_record', notify)
+    report = Mock(return_value=True)
+    monkeypatch.setattr('app.main.send_error', report)
     dispatcher = Mock()
     client = create_app(settings, dispatcher).test_client()
     body = {'record_id': 'recTest', 'event': 'leader_confirmed'}
@@ -101,6 +108,9 @@ def test_notification_endpoint_validation_and_failure(settings, monkeypatch):
     for event in ['leader_confirmed', 'assignee_confirmed', 'deadline_reminder']:
         assert client.post('/webhook/notify', json=body | {'event': event}, headers=headers).status_code == 200
         assert notify.call_args.args[:2] == ('recTest', event)
+    report.assert_not_called()
     notify.side_effect = RuntimeError('通知失败')
     assert client.post('/webhook/notify', json=body, headers=headers).status_code == 503
+    assert report.call_count == 1
+    assert report.call_args.args[:2] == ('recTest', '组长确认通知')
     dispatcher.submit.assert_not_called()

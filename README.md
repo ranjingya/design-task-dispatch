@@ -225,6 +225,8 @@ docker exec design-task-dispatch /app/.venv/bin/python -m app.cli retry <记录I
 
 配置加载、缓存命中、接口读写和匹配依据等细节使用 DEBUG 级别。HTTP 访问日志保留 4xx、5xx，成功请求由业务日志汇总。
 
+任务接收、处理、人员推荐、轮换位置保存或流程通知发生异常时，程序通过通知应用机器人私聊鸭腿，发送红色「美工任务 · 处理异常」卡片，包含任务名称（读取失败时显示记录 ID）、失败环节、简要原因和查看需求按钮。`config/notifications.toml` 中的 `error.enabled` 与 `[[error.recipients]]` 配置开关及接收人，每次报错读取；报错卡片隐藏应用密钥、Webhook 凭证及模型密钥。正常待确认结果沿用业务流程。报错通知发送失败记录日志，保留原任务的处理结果。
+
 在线读取默认最多 10 个资源、3 层内嵌、每份文档 2000 个内容块、每张多维表 100 个字段和 100 条记录；旧 Word 转换限时 60 秒。资源去重，附件和在线图片共用大小与图片限额，超限会标记材料缺口。部署时同步容器外的 `config/materials.json` 和 `prompts/classify.md`。
 
 应用日志同时写入控制台和 `logs/app.log`，单文件上限 10 MiB，保留 5 份备份，UTF-8 编码；任务空行分隔与异常堆栈保留。`LOG_DIR` 指定目录，Compose 将宿主机 `./logs` 挂载到 `/app/logs`。应用日志及 Gunicorn 工作进程错误访问、错误日志进入该文件，Gunicorn 主进程启动日志通过 `docker logs` 查看。
