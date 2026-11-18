@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import multiprocessing
 import re
 import sqlite3
 import threading
@@ -21,6 +22,39 @@ from app.rules import plain
 
 logger = logging.getLogger(__name__)
 ZONE = ZoneInfo("Asia/Shanghai")
+
+
+def listen_visual_events(settings, on_message):
+    """通过服务端 SDK 订阅群消息。参数 settings：飞书应用和目标群配置；on_message：接收目标群消息 ID 的回调。返回值：无，持续监听。"""
+    import lark_oapi as lark
+
+    def received(data):
+        """筛选目标群的人员消息，并通知读取线程。"""
+        event = data.event
+        if event.message.chat_id == settings.visual_sync_chat_id and event.sender.sender_type == "user":
+            on_message(event.message.message_id)
+
+    handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(received).build()
+    client = lark.ws.Client(settings.app_id, settings.app_secret, event_handler=handler,
+                            log_level=lark.LogLevel.WARNING)
+    client.start()
+
+
+def _event_worker(settings, wake, stop):
+    """在独立进程运行阻塞式 SDK。参数 settings：应用配置；wake：唤醒同步信号；stop：退出信号。返回值：无。"""
+    logging.basicConfig(level=logging.INFO)
+
+    def notify(message_id):
+        """记录事件并唤醒处理线程。"""
+        logger.info("收到视觉群消息事件 %s", message_id)
+        wake.set()
+
+    while not stop.is_set():
+        try:
+            listen_visual_events(settings, notify)
+        except Exception as exc:
+            logger.warning("视觉群长连接中断（%s），30 秒后重连", type(exc).__name__)
+        stop.wait(30)
 
 
 def message_link(message):
@@ -252,8 +286,8 @@ class VisualSync:
             except Exception:
                 logger.exception("视觉需求投递失败，下轮继续 id=%s", key)
 
-    def poll(self, stop, started):
-        """功能说明：轮询启动后的消息。参数 stop：退出信号；started：本次服务启动毫秒。返回值：无。"""
+    def poll(self, stop, started, wake):
+        """功能说明：轮询启动后的消息。参数 stop：退出信号；started：本次服务启动毫秒；wake：目标群新消息信号。返回值：无。"""
         path = self.client.settings.rules_cache_path.parent / "visual_sync.sqlite3"
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path) as db:
@@ -282,17 +316,33 @@ class VisualSync:
                     db.rollback()
                     logger.exception("视觉群读取失败，将从当前进度重试")
                 self.deliver(db)
-                stop.wait(30)
+                if wake.wait(30):
+                    wake.clear()
+                    # 历史接口按秒分页，等到消息进入上面的三秒可读窗口再取。
+                    stop.wait(3.1)
 
 
 def start_visual_sync(settings):
-    """功能说明：启动共享群轮询。参数 settings：运行配置。返回值：停止信号的回调。"""
+    """功能说明：启动共享群事件监听和历史补读。参数 settings：运行配置。返回值：停止信号的回调。"""
     worker = VisualSync(FeishuClient(settings))
-    stop = threading.Event()
+    context = multiprocessing.get_context("spawn")
+    wake = context.Event()
+    stop = context.Event()
     started = int(time.time() * 1000)
-    threading.Thread(target=worker.poll, args=(stop, started), name="visual-sync", daemon=True).start()
-    logger.info("视觉共享群同步启动")
-    return stop.set
+    listener = context.Process(target=_event_worker, args=(settings, wake, stop), name="visual-events", daemon=True)
+    listener.start()
+    threading.Thread(target=worker.poll, args=(stop, started, wake), name="visual-sync", daemon=True).start()
+    logger.info("视觉共享群服务端事件监听与历史补读已启动")
+
+    def close():
+        """关闭长连接进程，唤醒并结束读取线程。"""
+        stop.set()
+        wake.set()
+        if listener.is_alive():
+            listener.terminate()
+        listener.join()
+
+    return close
 
 
 def main():

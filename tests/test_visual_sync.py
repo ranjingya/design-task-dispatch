@@ -71,8 +71,26 @@ def test_restart_retries_notification_without_second_record(tmp_path, monkeypatc
     for _ in range(2):
         stop = Mock()
         stop.is_set.side_effect = [False, True]
-        worker.poll(stop, 10000)
+        worker.poll(stop, 10000, Mock())
     worker.messages.assert_called_once_with(10000, 17000)
     worker.client.create_visual_record.assert_called_once()
     assert worker.client.send_card.call_count == 2
     assert worker.client.send_card.call_args_list[0] == worker.client.send_card.call_args_list[1]
+
+
+def test_server_event_only_wakes_for_target_group_users(monkeypatch):
+    import lark_oapi as lark
+    from app.visual_sync import listen_visual_events
+
+    connection = Mock()
+    monkeypatch.setattr(lark.ws, "Client", connection)
+    received = Mock()
+    settings = SimpleNamespace(app_id="app", app_secret="secret", visual_sync_chat_id="oc_test")
+    listen_visual_events(settings, received)
+    connection.return_value.start.assert_called_once()
+    handler = connection.call_args.kwargs["event_handler"]
+    for chat, sender in [("oc_other", "user"), ("oc_test", "app"), ("oc_test", "user")]:
+        payload = {"schema": "2.0", "header": {"event_type": "im.message.receive_v1"},
+                   "event": {"sender": {"sender_type": sender}, "message": {"chat_id": chat, "message_id": "om_test"}}}
+        handler._do_without_validation(json.dumps(payload).encode())
+    received.assert_called_once_with("om_test")
