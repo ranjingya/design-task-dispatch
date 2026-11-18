@@ -296,7 +296,8 @@ def test_configuration_routes_and_members_consistent():
     assert config['members'] and config['ownership_routes'] and 'member_table' not in config
     assert 'base_token' not in config['product'] and 'table_id' not in config['product']
     for shop in config['shops']:
-        assert all(n in config['rotation'] for n in [shop['primary']] + shop['backup'])
+        assert all(n in config['members'] for n in [shop['primary']] + shop['backup'])
+    assert set(config['rotation']) == set(config['members']) - set(config['excluded_owners'])
 
 
 @pytest.mark.parametrize('name', ['members_table_id', 'product_base_token', 'product_2026_table_id', 'product_2027_table_id'])
@@ -509,3 +510,26 @@ def test_shop_team_order_and_dedup(client, owner, backups, expected):
     assert state is None
     loads = workloads([row('new', 推荐人=updates['推荐人'], 分数=4)], M, ['a', 'b'], 'self')
     assert all(loads[uid]['score'] == 4 for uid in expected)
+
+
+@pytest.mark.parametrize('keep_history', [True, False])
+def test_inactive_member_in_fixed_product_and_shop_routes(client, keep_history):
+    """负荷表保留或移除历史人员时，需求推荐均使用在岗名单。"""
+    path = client.settings.fields_path.parent / 'recommendation.json'
+    config = json.loads(path.read_text())
+    config['rotation'] = ['甲']
+    config['excluded_owners'].append('乙')
+    path.write_text(json.dumps(config))
+    if not keep_history:
+        client.data['members'] = [row('a', 人员=[{'id': 'a'}])]
+    assert run(client, fields={'推荐人': [{'id': 'b'}]})[0]['推荐人'] == [{'id': 'a'}]
+    assert run(client, '固定人员（乙 甲）')[0]['推荐人'] == [{'id': 'a'}]
+    updates, state = run(client, '固定人员（乙）')
+    assert updates['推荐人'] == [] and '人工分配' in updates['说明'] and state is None
+    client.data['products'] = [row('p', 商品='XX12345', 认领='乙')]
+    assert run(client, '找对应人员', 'product', {'title': 'XX12345'})[0]['推荐人'] == []
+    demand = {'department': '部门甲', 'platform': '店铺一'}
+    assert run(client, '找对应人员', 'shop', demand)[0]['推荐人'] == [{'id': 'a'}]
+    config['shops'][0].update(primary='乙', backup=['甲'])
+    path.write_text(json.dumps(config))
+    assert run(client, '找对应人员', 'shop', demand)[0]['推荐人'] == []

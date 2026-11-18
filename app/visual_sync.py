@@ -176,10 +176,15 @@ class VisualSync:
         recommendation = json.loads((ROOT / "config/recommendation.json").read_text())
         self.product = dict(recommendation["product"], code_pattern=self.config["code_pattern"])
         self.members = recommendation["members"]
+        self.owner_routes = self.config.get("owner_routes", {})
+        for owner, pool in self.owner_routes.items():
+            if (not isinstance(pool, list) or not pool or any(n not in self.members for n in pool)
+                    or len(pool) != len(set(pool)) or set(pool).intersection(recommendation["excluded_owners"])):
+                raise ValueError(f"视觉群承接人员配置无效：{owner}")
         self.catalog = None
 
     def resolve(self, codes, name):
-        """功能说明：按完整货号组合和品名版本查认领人。参数 codes：货号串；name：通知品名。返回值：品名与负责人标识，未匹配返回空标识。"""
+        """功能说明：按完整货号组合和品名版本查认领人。参数 codes：货号串；name：通知品名。返回值：品名与原认领人姓名，未匹配返回空。"""
         pattern = re.compile(self.config["code_pattern"], re.I)
         target = set(codes.split())
         if self.catalog is None:
@@ -217,15 +222,15 @@ class VisualSync:
                 name = " ".join(best.split())
         owner, reason, _, _ = product_owner({"title": codes, "platform": self.config["platform"]},
                                             candidates, self.product)
-        if owner not in self.members:
+        if owner not in self.members and owner not in self.owner_routes:
             logger.info("跳过款号 %s：%s", codes, reason)
             return name, None
         if not name and candidates:
             name = pattern.sub("", plain(candidates[0]["fields"][self.product["title_field"]])).strip(" -")
-        return name, self.members[owner]
+        return name, owner
 
     def plan(self, message):
-        """功能说明：生成可写入的记录。参数 message：一条真实群消息。返回值：飞书字段列表，仅包含已匹配负责人的款。"""
+        """功能说明：提取待登记款式。参数 message：一条真实群消息。返回值：已匹配的原认领人、需求字段组成的列表。"""
         cfg = self.config
         mentions = {x["id"] for x in message.get("mentions", [])}
         sender = message.get("sender", {})
@@ -241,17 +246,48 @@ class VisualSync:
         for codes, name, kind in products(message_text(message, include_mentions=False), cfg):
             if not kind and cfg["always_mention"] not in mentions:
                 continue
-            name, owner_id = self.resolve(codes, name)
-            if not owner_id:
+            name, owner = self.resolve(codes, name)
+            if not owner:
                 continue
             values = dict(code=codes, name=name, body=body, platform=cfg["platform"],
-                          owner=[{"id": owner_id}], sender=[{"id": sender["id"]}],
+                          sender=[{"id": sender["id"]}],
                           date=int(date.timestamp() * 1000))
             if link:
                 values["source_link"] = {"text": "查看原消息", "link": link}
             if kind:
                 values["kind"] = kind
-            rows.append({cfg["fields"][k]: v for k, v in values.items()})
+            rows.append((owner, {cfg["fields"][k]: v for k, v in values.items()}))
+        return rows
+
+    def queue_message(self, db, message):
+        """功能说明：按款式去重并确定承接人，与读取进度一并提交。参数 db：同步状态库；message：群消息。返回值：本次新增任务的完整字段列表。"""
+        fields = self.config["fields"]
+        rows = []
+        for owner, row in self.plan(message):
+            source = json.dumps([message["message_id"], row[fields["code"]], row[fields["name"]]])
+            pool = self.owner_routes.get(owner, [owner])
+            # 先取得该款的唯一登记位置。重复事件和并行读取都不会多占轮次。
+            slot = db.execute(
+                "INSERT INTO jobs (id, source, notification_body) VALUES (?,?,?) "
+                "ON CONFLICT(source) DO NOTHING RETURNING rowid",
+                (str(uuid.uuid4()), source, message_text(message, include_mentions=False)),
+            ).fetchone()
+            if slot is None:
+                continue
+            assignee = pool[0]
+            if len(pool) > 1:
+                previous = db.execute("SELECT last_member FROM owner_rotation WHERE owner=?", (owner,)).fetchone()
+                if previous and previous[0] in pool:
+                    assignee = pool[(pool.index(previous[0]) + 1) % len(pool)]
+                db.execute("INSERT INTO owner_rotation(owner, last_member) VALUES (?,?) "
+                           "ON CONFLICT(owner) DO UPDATE SET last_member=excluded.last_member", (owner, assignee))
+            row[fields["owner"]] = [{"id": self.members[assignee]}]
+            db.execute("UPDATE jobs SET payload=? WHERE rowid=?", (json.dumps(row, ensure_ascii=False), slot[0]))
+            if owner != assignee:
+                logger.info("视觉需求承接 款号=%s 原认领人=%s 负责人=%s", row[fields["code"]], owner, assignee)
+            rows.append(row)
+        if rows:
+            self.register_images(db, message)
         return rows
 
     def messages(self, start=None, end=None, limit=None):
@@ -417,6 +453,7 @@ class VisualSync:
         db.execute("CREATE TABLE IF NOT EXISTS message_images (message TEXT, image TEXT, position INTEGER, token TEXT, "
                    "PRIMARY KEY (message, image))")
         columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+        db.execute("CREATE TABLE IF NOT EXISTS owner_rotation (owner TEXT PRIMARY KEY, last_member TEXT NOT NULL)")
         if "unavailable_owner" not in columns:
             db.execute("ALTER TABLE jobs ADD COLUMN unavailable_owner TEXT")
         if "notification_body" not in columns:
@@ -444,16 +481,8 @@ class VisualSync:
                     if end > start:
                         self.catalog = None
                         for message in self.messages(start, end):
-                            rows = self.plan(message)
-                            logger.info("视觉群消息 %s 匹配 %d 款", message["message_id"], len(rows))
-                            if rows:
-                                self.register_images(db, message)
-                            for row in rows:
-                                fields = self.config["fields"]
-                                source = json.dumps([message["message_id"], row[fields["code"]], row[fields["name"]]])
-                                db.execute("INSERT OR IGNORE INTO jobs (id,source,payload,notification_body) VALUES (?,?,?,?)",
-                                           (str(uuid.uuid4()), source, json.dumps(row, ensure_ascii=False),
-                                            message_text(message, include_mentions=False)))
+                            rows = self.queue_message(db, message)
+                            logger.info("视觉群消息 %s 新增 %d 款", message["message_id"], len(rows))
                         db.execute("UPDATE progress SET cursor=? WHERE chat=?", (end, chat))
                         db.commit()
                     read_incident = None
@@ -525,15 +554,17 @@ def main():
     counts = Counter()
     names = {v: k for k, v in worker.members.items()}
     fields = worker.config["fields"]
-    for message in worker.messages(limit=args.preview):
-        rows = worker.plan(message)
-        counts["读取"] += 1
-        counts["拟入表消息" if rows else "跳过消息"] += 1
-        for row in rows:
-            kind = row.get(fields["kind"], "类型留空")
-            counts[kind] += 1
-            logger.info("预览 %s %s %s %s → %s", message["message_id"], kind, row[fields["code"]],
-                        row[fields["name"]], names[row[fields["owner"]][0]["id"]])
+    with sqlite3.connect(":memory:") as preview:
+        worker.prepare_jobs(preview)
+        for message in reversed(list(worker.messages(limit=args.preview))):
+            rows = worker.queue_message(preview, message)
+            counts["读取"] += 1
+            counts["拟入表消息" if rows else "跳过消息"] += 1
+            for row in rows:
+                kind = row.get(fields["kind"], "类型留空")
+                counts[kind] += 1
+                logger.info("预览 %s %s %s %s → %s", message["message_id"], kind, row[fields["code"]],
+                            row[fields["name"]], names[row[fields["owner"]][0]["id"]])
     logger.info("只读回放完成 %s", dict(counts))
 
 

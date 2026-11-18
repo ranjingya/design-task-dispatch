@@ -191,11 +191,15 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
         for k, v in routes.items()
     ):
         raise ValueError('推荐配置 ownership_routes 必须映射到 product、shop 或 product_platform')
-    if len(set(names.values())) != len(names) or set(config['rotation']) != set(names) or len(config['rotation']) != len(names):
+    excluded = set(config['excluded_owners'])
+    active = set(names) - excluded
+    if len(set(names.values())) != len(names) or set(config['rotation']) != active or len(config['rotation']) != len(active):
         raise ValueError('人员映射或轮换顺序有重复、缺失')
     current = {uid for row in feishu.get_records(settings.members_table_id)
                for uid in user_ids(row['fields'].get(config['member_field']))}
-    if set(names.values()) != current:
+    # 历史成员可留在负荷表中，参与推荐的成员仍须逐一核对。
+    current -= {names[n] for n in excluded if n in names}
+    if {names[n] for n in active} != current:
         raise ValueError('成员负荷表与推荐人员配置不一致')
     loads = workloads(feishu.get_records(feishu.settings.table_id), mapping, current, record_id)
     def describe(candidates):
@@ -213,8 +217,12 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
     if method.startswith('固定人员'):
         match = re.fullmatch(r'固定人员[（(](.+)[）)]', method)
         candidates = re.split(r'[\s、,，]+', match[1].strip()) if match else []
-        if not candidates or len(set(candidates)) != len(candidates) or any(n not in names for n in candidates):
+        if not candidates or len(set(candidates)) != len(candidates) or any(n not in names and n not in excluded for n in candidates):
             return answer('固定人员名单缺失或包含未配置成员，需人工确认', people=describe(list(config['rotation'])))
+        specified = candidates
+        candidates = [n for n in specified if n not in excluded]
+        if not candidates:
+            return answer(f'固定人员{"、".join(specified)}不参与分配，由组长安排', people='暂无候选人员')
         source = '指定人员负载最低优先，同分轮流'
         display_method = '固定人员'
     elif method == '找对应人员':
@@ -226,6 +234,9 @@ def recommend(record_id, fields, demand, rule, mapping, feishu):
                 logger.warning('店铺识别待确认：%s', basis)
                 return answer(basis + (f'；候选店铺：{choices}' if choices else ''))
             owner, backups = shop['primary'], shop['backup']
+            if owner in excluded:
+                return answer(f'店铺主负责人{owner}不参与分配，由组长安排')
+            backups = [n for n in backups if n not in excluded]
             if any(n not in names for n in [owner] + backups):
                 return answer('店铺团队存在未配置成员，需人工确认')
             team = list(dict.fromkeys([owner] + backups))

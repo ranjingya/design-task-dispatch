@@ -31,23 +31,30 @@ def worker_with_catalog():
     return worker
 
 
+def preview(worker, msg):
+    """用独立内存库预览一条消息的登记字段。"""
+    with sqlite3.connect(":memory:") as db:
+        worker.prepare_jobs(db)
+        return worker.queue_message(db, msg)
+
+
 def test_preview_mentions_variants_and_partial_match():
     worker = worker_with_catalog()
     text = "@_user_1\nABC1234帽子（青少年） 主图修改\nXYZ0000手套 数据包已完成"
     for who in ("always_mention", "conditional_mention"):
-        rows = worker.plan(message(worker, worker.config[who], text))
+        rows = preview(worker, message(worker, worker.config[who], text))
         assert len(rows) == 1
         assert rows[0]["负责人"] == [{"id": "b"}]
         assert rows[0]["品名"] == "帽子（青少年）"
         assert rows[0]["修改信息"] == text.replace("@_user_1", "@同事")
         assert rows[0]["原消息链接"] == {"text": "查看原消息", "link": "https://applink.feishu.cn/client/chat/open?openChatId=oc_test&position=0"}
         assert rows[0]["需求类型"] == "优化"
-    assert not worker.plan(message(worker, "other", text))
+    assert not preview(worker, message(worker, "other", text))
     vague = "ABC1234帽子\nY:\\数据包"
-    assert not worker.plan(message(worker, worker.config["conditional_mention"], vague))
-    assert "需求类型" not in worker.plan(message(worker, worker.config["always_mention"], vague))[0]
+    assert not preview(worker, message(worker, worker.config["conditional_mention"], vague))
+    assert "需求类型" not in preview(worker, message(worker, worker.config["always_mention"], vague))[0]
     combo = "ABC1234 XYZ9999 帽子+围巾 数据包已完成"
-    assert [r["货号"] for r in worker.plan(message(worker, worker.config["always_mention"], combo))] == ["ABC1234 XYZ9999"]
+    assert [r["货号"] for r in preview(worker, message(worker, worker.config["always_mention"], combo))] == ["ABC1234 XYZ9999"]
     worker.client.send_card.assert_not_called()
     worker.client.create_visual_record.assert_not_called()
 
@@ -76,8 +83,7 @@ def test_restart_retries_notification_without_second_record(tmp_path, monkeypatc
     worker.bot.send_card.side_effect = [error, error, "om_ok" if third_succeeds else error]
     msg = message(worker, worker.config["always_mention"], "ABC1234帽子 数据包已完成")
     worker.messages = Mock(return_value=[msg, msg])
-    row = worker.plan(msg)[0]
-    worker.plan = Mock(return_value=[row])
+    worker.plan = Mock(return_value=worker.plan(msg))
     monkeypatch.setattr("app.visual_sync.time.time", lambda: now)
     for now, count in [(20, 1), (49, 1), (50, 2), (79, 2), (80, 3), (110, 3)]:
         stop = Mock()
@@ -172,7 +178,7 @@ def test_unavailable_owner_transfers_once_and_retries_only_forward(tmp_path, mon
     worker.bot = Mock()
     worker.bot.send_card.side_effect = [unavailable, unavailable, "om_ok"]
     msg = message(worker, worker.config["always_mention"], "ABC1234 帽子 数据包已完成")
-    row = worker.plan(msg)[0]
+    row = preview(worker, msg)[0]
     path = tmp_path / "jobs.sqlite3"
     with sqlite3.connect(path) as db:
         worker.prepare_jobs(db)
@@ -226,3 +232,32 @@ def test_send_api_preserves_unavailable_error_code(monkeypatch):
     with pytest.raises(FeishuAPIError) as failure:
         FeishuClient._request("POST", "/im/v1/messages", retry_transient=False)
     assert (failure.value.path, failure.value.code) == ("/im/v1/messages", 230013)
+
+
+def test_visual_reassignment_preserves_order_on_replay_rollback_and_restart(tmp_path, monkeypatch):
+    """青提按款轮换，花菜固定交接；回滚、重复投递或重新开库不跳号。"""
+    worker = VisualSync(Mock(settings=SimpleNamespace(visual_sync_chat_id="oc_test", base_token="base")))
+    worker.catalog = [
+        {"record_id": str(i), "fields": {"货号+品名": code + " 帽子", "负责人": name}}
+        for i, (code, name) in enumerate([("KQ12345", "青提"), ("KQ12346", "花菜"), ("KQ12347", "饭团")])]
+    worker.bot = Mock()
+    worker.client.create_visual_record.return_value = "rec"
+    monkeypatch.setattr("app.visual_sync.alert_open_id", lambda uid, *_: uid)
+    path = tmp_path / "jobs.db"
+    order = ["塔可", "软糖", "饭团", "饭团", "蛋糕", "软糖", "塔可"]
+    for i, code in enumerate(["KQ12345", "KQ12346", "KQ12347"] + ["KQ12345"] * 4):
+        msg = message(worker, worker.config["always_mention"], code + "帽子 主图修改")
+        msg["message_id"] = str(i)
+        expected = worker.members[order[i]]
+        with sqlite3.connect(path) as db:
+            worker.prepare_jobs(db)
+            rows = worker.queue_message(db, msg)
+            db.rollback()
+            assert rows == worker.queue_message(db, msg)
+            assert rows[0]["负责人"] == [{"id": expected}]
+            assert worker.queue_message(db, msg) == []
+            db.commit()
+            worker.deliver(db)
+            assert worker.client.create_visual_record.call_args.args[1]["负责人"] == [{"id": expected}]
+            assert worker.bot.send_card.call_args.args[0] == expected
+    assert worker.bot.send_card.call_count == len(order)

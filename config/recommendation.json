@@ -3,12 +3,12 @@
   "rotation": [
     "蛋糕",
     "饭团",
-    "青提",
     "软糖",
     "塔可"
   ],
   "excluded_owners": [
-    "花菜"
+    "花菜",
+    "青提"
   ],
   "product": {
     "title_field": "货号+品名",
