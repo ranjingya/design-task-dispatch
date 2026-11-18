@@ -24,11 +24,13 @@ class FeishuClient:
         self._contact_cache: dict[tuple[str, str], tuple[float, dict]] = {}
 
     @staticmethod
-    def _request(method: str, path: str, **kwargs) -> dict:
-        """功能说明：调用飞书接口并重试瞬时故障。参数 method：HTTP方法；path：接口路径；kwargs：请求参数。返回值：成功的JSON响应。"""
+    def _request(method: str, path: str, *, retry_transient: bool = True, **kwargs) -> dict:
+        """功能说明：调用飞书接口并重试瞬时故障。参数 method：HTTP方法；path：接口路径；retry_transient：是否重试瞬时错误；kwargs：请求参数。返回值：成功的JSON响应。"""
         # 查询、幂等字段回写和取凭证可重试；创建类请求不自动重放。
         message_retry = method.upper() == "POST" and path == "/im/v1/messages" and bool(kwargs.get("json", {}).get("uuid"))
         attempts = 3 if method.upper() in {"GET", "PUT"} or path == "/auth/v3/tenant_access_token/internal" or message_retry else 1
+        if not retry_transient:
+            attempts = 1
         for attempt in range(1, attempts + 1):
             retryable = False
             try:
@@ -71,9 +73,9 @@ class FeishuClient:
                 self._expires_at = time.monotonic() + max(0, data["expire"] - 60)
             return self._token
 
-    def send_card(self, open_id: str, content: dict, message_uuid: str) -> str:
+    def send_card(self, open_id: str, content: dict, message_uuid: str, *, retry_transient: bool = True) -> str:
         """功能说明：应用机器人发送私聊卡片，同一 UUID 支持安全重试。参数 open_id：通知应用下的人员 Open ID；content：Card 2.0 内容；message_uuid：通知幂等键。返回值：消息 ID。"""
-        data = self._request("POST", "/im/v1/messages", params={"receive_id_type": "open_id"},
+        data = self._request("POST", "/im/v1/messages", params={"receive_id_type": "open_id"}, retry_transient=retry_transient,
                              headers={"Authorization": f"Bearer {self._access_token()}"},
                              json={"receive_id": open_id, "msg_type": "interactive",
                                    "content": json.dumps(content, ensure_ascii=False), "uuid": message_uuid})

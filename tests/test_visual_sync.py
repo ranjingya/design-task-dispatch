@@ -1,6 +1,9 @@
 """验证群消息预览、启动边界与登记后的提醒重试。"""
 
 import json
+import sqlite3
+
+import pytest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -58,24 +61,36 @@ def test_pagination_excludes_before_start_and_next_window():
     assert all(call.args[1]["container_id"] == "oc_test" for call in worker.client.material_get.call_args_list)
 
 
-def test_restart_retries_notification_without_second_record(tmp_path, monkeypatch):
+@pytest.mark.parametrize("third_succeeds", [False, True])
+def test_restart_retries_notification_without_second_record(tmp_path, monkeypatch, third_succeeds):
     worker = worker_with_catalog()
-    worker.client.settings = SimpleNamespace(rules_cache_path=tmp_path / "rules.json", base_token="base")
+    worker.client.settings = SimpleNamespace(rules_cache_path=tmp_path / "rules.json", base_token="base", app_id="data")
     worker.client.create_visual_record.return_value = "record"
-    worker.client.send_card.side_effect = [RuntimeError("模拟发送失败"), "ok"]
+    worker.bot = Mock()
+    worker.bot.settings.app_id = "alert"
+    worker.client.get_contact_user.return_value = {"union_id": "on_test"}
+    worker.bot.get_contact_user_by_union_id.return_value = {"open_id": "ou_alert"}
+    error = RuntimeError("模拟发送失败")
+    worker.bot.send_card.side_effect = [error, error, "om_ok" if third_succeeds else error]
     msg = message(worker, worker.config["always_mention"], "ABC1234帽子 数据包已完成")
     worker.messages = Mock(return_value=[msg, msg])
     row = worker.plan(msg)[0]
     worker.plan = Mock(return_value=[row])
-    monkeypatch.setattr("app.visual_sync.time.time", lambda: 20)
-    for _ in range(2):
+    monkeypatch.setattr("app.visual_sync.time.time", lambda: now)
+    for now, count in [(20, 1), (49, 1), (50, 2), (79, 2), (80, 3), (110, 3)]:
         stop = Mock()
         stop.is_set.side_effect = [False, True]
         worker.poll(stop, 10000, Mock())
-    worker.messages.assert_called_once_with(10000, 17000)
+        assert worker.bot.send_card.call_count == count
+    assert worker.messages.call_args_list[0].args == (10000, 17000)
     worker.client.create_visual_record.assert_called_once()
-    assert worker.client.send_card.call_count == 2
-    assert worker.client.send_card.call_args_list[0] == worker.client.send_card.call_args_list[1]
+    calls = worker.bot.send_card.call_args_list
+    assert calls[0] == calls[1] == calls[2]
+    assert calls[0].args[0] == "ou_alert"
+    assert calls[0].kwargs == {"retry_transient": False}
+    worker.client.send_card.assert_not_called()
+    with sqlite3.connect(tmp_path / "visual_sync.sqlite3") as db:
+        assert db.execute("SELECT sent, notify_attempts FROM jobs").fetchall() == [(int(third_succeeds), 3)]
 
 
 def test_server_event_only_wakes_for_target_group_users(monkeypatch):

@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from collections import Counter
+from dataclasses import replace
 from datetime import datetime
 import unicodedata
 from urllib.parse import urlencode
@@ -17,11 +18,14 @@ from zoneinfo import ZoneInfo
 
 from app.config import ROOT, Settings
 from app.feishu import FeishuClient
+from app.notifications import alert_open_id
 from app.recommendation import product_owner
 from app.rules import plain
 
 logger = logging.getLogger(__name__)
 ZONE = ZoneInfo("Asia/Shanghai")
+NOTIFY_MAX_ATTEMPTS = 3
+NOTIFY_RETRY_SECONDS = 30
 
 
 def listen_visual_events(settings, on_message):
@@ -151,6 +155,7 @@ class VisualSync:
 
     def __init__(self, client):
         self.client = client
+        self.bot = None
         self.chat_id = client.settings.visual_sync_chat_id
         if not self.chat_id.startswith("oc_"):
             raise ValueError("请在 .env 中设置 VISUAL_SYNC_CHAT_ID，填写 oc_ 开头的飞书群 ID")
@@ -266,7 +271,11 @@ class VisualSync:
     def deliver(self, db):
         """功能说明：登记待处理款并通知负责人。参数 db：本地同步状态库。返回值：无，逐步保存记录及提醒结果。"""
         fields = self.config["fields"]
-        for key, payload, record in db.execute("SELECT id, payload, record FROM jobs WHERE sent=0").fetchall():
+        due = db.execute(
+            "SELECT id, payload, record FROM jobs WHERE sent=0 AND notify_attempts < ? AND notify_after <= ?",
+            (NOTIFY_MAX_ATTEMPTS, time.time()),
+        ).fetchall()
+        for key, payload, record in due:
             row = json.loads(payload)
             try:
                 if not record:
@@ -279,19 +288,51 @@ class VisualSync:
                 card = {"schema": "2.0", "header": {"title": {"tag": "plain_text", "content": title}},
                         "body": {"elements": [{"tag": "div", "text": {"tag": "plain_text", "content": label}},
                                               {"tag": "markdown", "content": f"[查看需求记录]({url})"}]}}
-                self.client.send_card(row[fields["owner"]][0]["id"], card, key)
+            except Exception:
+                logger.exception("视觉需求登记失败，下轮继续 id=%s", key)
+                continue
+
+            # 先持久化尝试，再请求飞书；即使进程在等待回执时退出，也保留次数与发送间隔。
+            attempt = db.execute(
+                "UPDATE jobs SET notify_attempts=notify_attempts+1, notify_after=? "
+                "WHERE id=? AND sent=0 AND notify_attempts < ? AND notify_after <= ? RETURNING notify_attempts",
+                (time.time() + NOTIFY_RETRY_SECONDS, key, NOTIFY_MAX_ATTEMPTS, time.time()),
+            ).fetchone()
+            db.commit()
+            if attempt is None:
+                continue
+            try:
+                settings = self.client.settings
+                if self.bot is None:
+                    self.bot = FeishuClient(replace(settings, app_id=settings.alert_app_id,
+                                                    app_secret=settings.alert_app_secret))
+                recipient = alert_open_id(row[fields["owner"]][0]["id"], self.client, self.bot)
+                message_id = self.bot.send_card(recipient, card, key, retry_transient=False)
                 db.execute("UPDATE jobs SET sent=1 WHERE id=?", (key,))
                 db.commit()
-                logger.info("视觉需求已登记并提醒 %s record=%s", label, record)
+                logger.info("视觉需求已登记并提醒 %s record=%s message=%s", label, record, message_id)
             except Exception:
-                logger.exception("视觉需求投递失败，下轮继续 id=%s", key)
+                db.execute("UPDATE jobs SET notify_after=? WHERE id=?", (time.time() + NOTIFY_RETRY_SECONDS, key))
+                db.commit()
+                outcome = "停止重试" if attempt[0] == NOTIFY_MAX_ATTEMPTS else "30 秒后重试"
+                logger.exception("视觉需求通知失败 %s/%s，%s record=%s", attempt[0], NOTIFY_MAX_ATTEMPTS, outcome, record)
+
+    @staticmethod
+    def prepare_jobs(db):
+        """初始化通知状态并升级已有任务。参数 db：同步状态库。返回值：无。"""
+        db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, source TEXT UNIQUE, payload TEXT, record TEXT, sent INTEGER DEFAULT 0)")
+        columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+        if "notify_attempts" not in columns:
+            db.execute("ALTER TABLE jobs ADD COLUMN notify_attempts INTEGER NOT NULL DEFAULT 0")
+        if "notify_after" not in columns:
+            db.execute("ALTER TABLE jobs ADD COLUMN notify_after REAL NOT NULL DEFAULT 0")
 
     def poll(self, stop, started, wake):
         """功能说明：轮询启动后的消息。参数 stop：退出信号；started：本次服务启动毫秒；wake：目标群新消息信号。返回值：无。"""
         path = self.client.settings.rules_cache_path.parent / "visual_sync.sqlite3"
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path) as db:
-            db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, source TEXT UNIQUE, payload TEXT, record TEXT, sent INTEGER DEFAULT 0)")
+            self.prepare_jobs(db)
             db.execute("CREATE TABLE IF NOT EXISTS progress (chat TEXT PRIMARY KEY, cursor INTEGER)")
             chat = self.chat_id
             db.execute("INSERT OR IGNORE INTO progress VALUES (?,?)", (chat, started))
@@ -316,7 +357,12 @@ class VisualSync:
                     db.rollback()
                     logger.exception("视觉群读取失败，将从当前进度重试")
                 self.deliver(db)
-                if wake.wait(30):
+                next_retry, = db.execute(
+                    "SELECT MIN(notify_after) FROM jobs WHERE sent=0 AND notify_attempts BETWEEN 1 AND ?",
+                    (NOTIFY_MAX_ATTEMPTS - 1,),
+                ).fetchone()
+                wait = min(30, max(0, next_retry - time.time())) if next_retry is not None else 30
+                if wake.wait(wait):
                     wake.clear()
                     # 历史接口按秒分页，等到消息进入上面的三秒可读窗口再取。
                     stop.wait(3.1)
