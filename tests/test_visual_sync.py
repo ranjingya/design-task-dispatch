@@ -10,7 +10,7 @@ from app.visual_sync import VisualSync
 def message(worker, who, text):
     """构造带有真实接口结构的消息。"""
     return {"sender": {"sender_type": "user", "id": "designer"}, "msg_type": "text",
-            "message_id": "sample", "create_time": "1730000000123",
+            "chat_id": "oc_test", "message_position": "0", "message_id": "sample", "create_time": "1730000000123",
             "mentions": [{"id": who, "key": "@_user_1", "name": "同事"}],
             "body": {"content": json.dumps({"text": text})}}
 
@@ -35,6 +35,7 @@ def test_preview_mentions_variants_and_partial_match():
         assert rows[0]["负责人"] == [{"id": "b"}]
         assert rows[0]["品名"] == "帽子（青少年）"
         assert rows[0]["修改信息"] == text.replace("@_user_1", "@同事")
+        assert rows[0]["原消息链接"] == {"text": "查看原消息", "link": "https://applink.feishu.cn/client/chat/open?openChatId=oc_test&position=0"}
         assert rows[0]["需求类型"] == "优化"
     assert not worker.plan(message(worker, "other", text))
     vague = "ABC1234帽子\nY:\\数据包"

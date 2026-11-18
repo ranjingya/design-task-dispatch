@@ -11,6 +11,7 @@ import uuid
 from collections import Counter
 from datetime import datetime
 import unicodedata
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from app.config import ROOT, Settings
@@ -20,6 +21,25 @@ from app.rules import plain
 
 logger = logging.getLogger(__name__)
 ZONE = ZoneInfo("Asia/Shanghai")
+
+
+def message_link(message):
+    """根据飞书返回的链接或群聊、话题中的消息位置生成原消息链接。"""
+    if message.get("message_app_link"):
+        return message["message_app_link"]
+    chat = message.get("chat_id")
+    if not chat:
+        return None
+    thread = message.get("thread_id")
+    position = message.get("thread_message_position")
+    if thread and str(position).isdecimal():
+        params = dict(openchatid=chat, openthreadid=thread, open_chat_id=chat,
+                      open_thread_id=thread, thread_position=position)
+        return "https://applink.feishu.cn/client/thread/open?" + urlencode(params)
+    position = message.get("message_position")
+    if str(position).isdecimal():
+        return "https://applink.feishu.cn/client/chat/open?" + urlencode(dict(openChatId=chat, position=position))
+    return None
 
 
 def message_text(message):
@@ -162,6 +182,7 @@ class VisualSync:
         date = datetime.fromtimestamp(int(message["create_time"]) / 1000, ZONE)
         date = date.replace(hour=0, minute=0, second=0, microsecond=0)
         rows = []
+        link = message_link(message)
         analysis_text = body
         for mention in message.get("mentions", []):
             analysis_text = analysis_text.replace("@" + mention["name"], "")
@@ -174,6 +195,8 @@ class VisualSync:
             values = dict(code=codes, name=name, body=body, platform=cfg["platform"],
                           owner=[{"id": owner_id}], sender=[{"id": sender["id"]}],
                           date=int(date.timestamp() * 1000))
+            if link:
+                values["source_link"] = {"text": "查看原消息", "link": link}
             if kind:
                 values["kind"] = kind
             rows.append({cfg["fields"][k]: v for k, v in values.items()})
