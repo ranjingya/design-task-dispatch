@@ -117,6 +117,9 @@ class VisualSync:
 
     def __init__(self, client):
         self.client = client
+        self.chat_id = client.settings.visual_sync_chat_id
+        if not self.chat_id.startswith("oc_"):
+            raise ValueError("请在 .env 中设置 VISUAL_SYNC_CHAT_ID，填写 oc_ 开头的飞书群 ID")
         self.config = json.loads((ROOT / "config/visual_sync.json").read_text())
         recommendation = json.loads((ROOT / "config/recommendation.json").read_text())
         self.product = dict(recommendation["product"], code_pattern=self.config["code_pattern"])
@@ -204,7 +207,7 @@ class VisualSync:
 
     def messages(self, start=None, end=None, limit=None):
         """功能说明：按时间分页读取群消息。参数 start、end：起止毫秒；limit：历史预览上限。返回值：消息迭代器。"""
-        params = dict(container_id_type="chat", container_id=self.config["chat"],
+        params = dict(container_id_type="chat", container_id=self.chat_id,
                       page_size=min(limit or 50, 50), sort_type="ByCreateTimeDesc" if limit else "ByCreateTimeAsc")
         if start is not None:
             params.update(start_time=str(start // 1000), end_time=str((end + 999) // 1000))
@@ -256,7 +259,7 @@ class VisualSync:
         with sqlite3.connect(path) as db:
             db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, source TEXT UNIQUE, payload TEXT, record TEXT, sent INTEGER DEFAULT 0)")
             db.execute("CREATE TABLE IF NOT EXISTS progress (chat TEXT PRIMARY KEY, cursor INTEGER)")
-            chat = self.config["chat"]
+            chat = self.chat_id
             db.execute("INSERT OR IGNORE INTO progress VALUES (?,?)", (chat, started))
             db.commit()
             while not stop.is_set():

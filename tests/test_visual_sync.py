@@ -17,7 +17,9 @@ def message(worker, who, text):
 
 def worker_with_catalog():
     """构造只使用模拟飞书接口的处理器。"""
-    worker = VisualSync(Mock())
+    client = Mock()
+    client.settings.visual_sync_chat_id = "oc_test"
+    worker = VisualSync(client)
     worker.members = {"甲": "a", "乙": "b"}
     worker.catalog = [{"fields": {"货号+品名": title, "负责人": owner}, "record_id": str(i)}
                       for i, (title, owner) in enumerate([
@@ -53,6 +55,7 @@ def test_pagination_excludes_before_start_and_next_window():
         {"items": [{"create_time": str(t)} for t in [1000, 1100]], "has_more": True, "page_token": "next"},
         {"items": [{"create_time": str(t)} for t in [1200, 1800]]}]
     assert [m["create_time"] for m in worker.messages(1100, 1800)] == ["1100", "1200"]
+    assert all(call.args[1]["container_id"] == "oc_test" for call in worker.client.material_get.call_args_list)
 
 
 def test_restart_retries_notification_without_second_record(tmp_path, monkeypatch):

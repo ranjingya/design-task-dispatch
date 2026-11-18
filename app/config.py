@@ -43,6 +43,8 @@ class Settings:
     alert_app_id: str = ""
     alert_app_secret: str = field(default="", repr=False)
 
+    visual_sync_chat_id: str = ""
+
     @classmethod
     def from_env(cls):
         """功能说明：加载并校验环境配置。参数 cls：配置类。返回值：配置实例。"""
@@ -76,6 +78,7 @@ class Settings:
             max_images=int(os.getenv("MAX_IMAGES", "32")),
             max_image_bytes=int(os.getenv("MAX_IMAGE_BYTES", str(10 * 1024 * 1024))),
             max_total_image_bytes=int(os.getenv("MAX_TOTAL_IMAGE_BYTES", str(20 * 1024 * 1024))),
+            visual_sync_chat_id=os.getenv("VISUAL_SYNC_CHAT_ID", "").strip(),
             alert_app_id=os.getenv("FEISHU_ALERT_APP_ID", "").strip(),
             alert_app_secret=os.getenv("FEISHU_ALERT_APP_SECRET", "").strip(),
         )
