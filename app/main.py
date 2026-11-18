@@ -32,7 +32,11 @@ def create_app(settings: Settings | None = None, dispatcher=None) -> Flask:
         atexit.register(dispatcher.close)
         if os.getenv("VISUAL_SYNC_ENABLED") == "1":
             from app.visual_sync import start_visual_sync
-            atexit.register(start_visual_sync(settings))
+            try:
+                atexit.register(start_visual_sync(settings))
+            except Exception as exc:
+                send_error("", "启动视觉群同步", exc, FeishuClient(settings), "视觉共享群同步", visual=True)
+                raise
 
     @app.get("/health")
     def health():

@@ -139,8 +139,19 @@ def send_new_task(record_id, mapping, feishu):
     return deliver(record_id, mapping, feishu, recipients, "new_task")
 
 
-def send_error(record_id, stage, error, feishu, title=None):
-    """功能说明：向配置人员发送报错卡片，通知失败仅记录日志。参数 record_id：需求记录 ID；stage：失败环节；error：原始异常；feishu：数据客户端；title：已读取的任务名称，缺失时显示记录 ID。返回值：通知成功或未启用时为真，发送失败时为假。"""
+def red_card(card):
+    """将异常卡片的标题和正文区域设为红色，保留原有正文和按钮排列。"""
+    card["header"]["template"] = "red"
+    card["body"]["elements"] = [{
+        "tag": "column_set", "background_style": "red-50",
+        "columns": [{"tag": "column", "width": "weighted", "weight": 1,
+                     "elements": card["body"]["elements"]}],
+    }]
+    return card
+
+
+def send_error(record_id, stage, error, feishu, title=None, *, visual=False, table_id=None, incident=None):
+    """功能说明：向配置人员发送报错卡片，通知失败仅记录日志。参数 record_id：需求记录 ID；stage：失败环节；error：原始异常；feishu：数据客户端；title：已读取的任务名称，缺失时显示记录 ID；visual：视觉群告警样式；table_id：业务表 ID；incident：同一故障去重标识。返回值：通知成功或未启用时为真，发送失败时为假。"""
     try:
         settings = feishu.settings
         config = load_notifications(settings.fields_path.parent / "notifications.toml", "error")
@@ -158,7 +169,7 @@ def send_error(record_id, stage, error, feishu, title=None):
             f"**失败原因：** {escape_text(reason)}",
         ])
         url = (f"https://feishu.cn/base/{quote(settings.base_token, safe='')}"
-               f"?table={quote(settings.table_id, safe='')}&record={quote(record_id, safe='')}")
+               f"?table={quote(table_id or settings.table_id, safe='')}&record={quote(record_id, safe='')}")
         content = {"schema": "2.0", "config": {"width_mode": "default"},
                    "header": {"title": {"tag": "plain_text", "content": "美工任务 · 处理异常"}, "template": "red"},
                    "body": {"direction": "vertical", "vertical_spacing": "12px", "elements": [
@@ -166,8 +177,13 @@ def send_error(record_id, stage, error, feishu, title=None):
                        {"tag": "button", "text": {"tag": "plain_text", "content": "查看需求"}, "type": "default",
                         "behaviors": [{"type": "open_url", "default_url": url}]},
                    ]}}
-        # 每次失败独立通知，单次发送内沿用原有消息去重与网络重试。
-        return deliver(record_id, {}, feishu, recipients, "error", version=str(time.time_ns()), content=content)
+        if visual:
+            content["header"]["title"]["content"] = "视觉群需求 · 处理异常"
+            if not record_id:
+                content["body"]["elements"].pop()
+            red_card(content)
+        # 同一故障沿用已有发送回执，独立失败可分别告警。
+        return deliver(record_id, {}, feishu, recipients, "error", version=incident or str(time.time_ns()), content=content)
     except Exception as exc:
         logger.warning("报错通知失败 原因=%s", exc)
         return False

@@ -422,3 +422,20 @@ def test_deadline_uses_service_timezone_for_timestamp(deadline_client):
     _, _, clock = deadline_client
     value = int(datetime.fromisoformat('2026-10-18T16:00:00+00:00').timestamp() * 1000)
     assert deadline_date(str(value)) == clock.now.return_value.date()
+
+
+def test_visual_error_uses_error_recipient_and_visual_table(error_client, monkeypatch):
+    """视觉群报错使用独立的报错名单、红色正文及视觉需求记录链接。"""
+    send = Mock(return_value='om_error')
+    monkeypatch.setattr(FeishuClient, 'send_card', send)
+    for _ in range(2):
+        assert send_error('recVisual', '发送负责人提醒', ValueError('字段缺失'), error_client,
+                          visual=True, table_id='tblVisual', incident='test')
+    send.assert_called_once()
+    recipient, card, _ = send.call_args.args
+    assert recipient == 'ou_error' and card['header']['template'] == 'red'
+    panel, = card['body']['elements']
+    assert panel['background_style'] == 'red-50'
+    reason, button = panel['columns'][0]['elements']
+    assert '字段缺失' in reason['content']
+    assert 'table=tblVisual&record=recVisual' in button['behaviors'][0]['default_url']

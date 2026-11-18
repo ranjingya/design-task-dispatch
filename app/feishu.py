@@ -16,6 +16,15 @@ logger = logging.getLogger(__name__)
 API = "https://open.feishu.cn/open-apis"
 
 
+class FeishuAPIError(RuntimeError):
+    """飞书业务错误，保留出错接口和结构化错误码。"""
+
+    def __init__(self, message, path, code):
+        super().__init__(message)
+        self.path = path
+        self.code = code
+
+
 class FeishuClient:
     def __init__(self, settings: Settings):
         """功能说明：初始化飞书网关。参数 settings：应用及目标表配置。返回值：无。"""
@@ -34,6 +43,7 @@ class FeishuClient:
         if not retry_transient:
             attempts = 1
         for attempt in range(1, attempts + 1):
+            code = None
             retryable = False
             try:
                 response = httpx.request(method, API + path, timeout=30, **kwargs)
@@ -56,7 +66,10 @@ class FeishuClient:
                 # 多维表数据未就绪使用 HTTP 400，但允许稍后重试。
                 retryable = response.status_code in {429, 500, 502, 503, 504} or code == 1254607
             if not retryable or attempt == attempts:
-                raise RuntimeError(f"{error} 尝试={attempt}/{attempts}") from None
+                message = f"{error} 尝试={attempt}/{attempts}"
+                if code is not None:
+                    raise FeishuAPIError(message, path, code)
+                raise RuntimeError(message) from None
             delay = 2 ** (attempt - 1)
             logger.warning("飞书请求重试 method=%s 次数=%d/%d 等待=%ds 原因=%s",
                            method, attempt, attempts, delay, error)

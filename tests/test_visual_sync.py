@@ -70,6 +70,8 @@ def test_restart_retries_notification_without_second_record(tmp_path, monkeypatc
     worker.bot.settings.app_id = "alert"
     worker.client.get_contact_user.return_value = {"union_id": "on_test"}
     worker.bot.get_contact_user_by_union_id.return_value = {"open_id": "ou_alert"}
+    report = Mock()
+    monkeypatch.setattr("app.visual_sync.send_error", report)
     error = RuntimeError("模拟发送失败")
     worker.bot.send_card.side_effect = [error, error, "om_ok" if third_succeeds else error]
     msg = message(worker, worker.config["always_mention"], "ABC1234帽子 数据包已完成")
@@ -82,6 +84,7 @@ def test_restart_retries_notification_without_second_record(tmp_path, monkeypatc
         stop.is_set.side_effect = [False, True]
         worker.poll(stop, 10000, Mock())
         assert worker.bot.send_card.call_count == count
+        assert report.call_args.args[:2] == ("record", "发送负责人提醒")
     assert worker.messages.call_args_list[0].args == (10000, 17000)
     worker.client.create_visual_record.assert_called_once()
     calls = worker.bot.send_card.call_args_list
@@ -151,3 +154,75 @@ def test_message_images_keep_order_and_reuse_successful_uploads():
             worker.attach_images(db, "om_source", row)
             assert row["消息附件"] == [{"file_token": "first"}, {"file_token": "second"}]
     assert [call.args[1] for call in worker.client.upload_message_image.call_args_list] == ["one", "two", "two"]
+
+
+def test_unavailable_owner_transfers_once_and_retries_only_forward(tmp_path, monkeypatch):
+    """负责人不可见后立刻转交。转交失败先报错，重开状态库仍只重试接手人。"""
+    from app.feishu import FeishuAPIError
+
+    worker = worker_with_catalog()
+    worker.client.settings = SimpleNamespace(fields_path=tmp_path / "fields.json", base_token="base")
+    (tmp_path / "notifications.toml").write_text(
+        '[visual_owner_unavailable]\nenabled=true\n[[visual_owner_unavailable.recipients]]\n'
+        'name="接手人"\nopen_id="ou_backup"\nenabled=true\n')
+    monkeypatch.setattr("app.visual_sync.alert_open_id", lambda uid, *_: f"ou_{uid}")
+    error = Mock()
+    monkeypatch.setattr("app.visual_sync.send_error", error)
+    unavailable = FeishuAPIError("机器人不可见", "/im/v1/messages", 230013)
+    worker.bot = Mock()
+    worker.bot.send_card.side_effect = [unavailable, unavailable, "om_ok"]
+    msg = message(worker, worker.config["always_mention"], "ABC1234 帽子 数据包已完成")
+    row = worker.plan(msg)[0]
+    path = tmp_path / "jobs.sqlite3"
+    with sqlite3.connect(path) as db:
+        worker.prepare_jobs(db)
+        db.execute("INSERT INTO jobs(id, payload, record, notification_body) VALUES(?,?,?,?)",
+                   ("job", json.dumps(row), "rec", "原文"))
+        worker.deliver(db)
+    error.assert_called_once()
+    assert error.call_args.args[:2] == ("rec", "转交负责人提醒")
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE jobs SET notify_after=0")
+        worker.deliver(db)
+        worker.deliver(db)
+        assert db.execute("SELECT sent, unavailable_owner FROM jobs").fetchone() == (1, "ou_a")
+    original, forward, retry = worker.bot.send_card.call_args_list
+    assert original.args[0] == "ou_a" and forward.args[0] == "ou_backup"
+    assert original.args[2] != forward.args[2] and forward == retry
+    card = forward.args[1]
+    assert card["header"]["template"] == "red"
+    panel, = card["body"]["elements"]
+    assert panel["background_style"] == "red-50"
+    markdown, buttons = panel["columns"][0]["elements"]
+    assert '**负责人：** <at id="ou_a"></at>（目标人员已不再可见）' in markdown["content"]
+    assert '**视觉设计：** <at id="ou_designer"></at>' in markdown["content"]
+    assert len(buttons["columns"]) == 2
+    worker.client.create_visual_record.assert_not_called()
+
+
+def test_program_error_in_message_parsing_alerts_immediately(tmp_path, monkeypatch):
+    """解析异常直接报告并保留游标。"""
+    worker = worker_with_catalog()
+    worker.client.settings.rules_cache_path = tmp_path / "rules.json"
+    worker.messages = Mock(return_value=[{}])
+    stop = Mock()
+    stop.is_set.side_effect = [False, True]
+    report = Mock()
+    monkeypatch.setattr("app.visual_sync.send_error", report)
+    worker.poll(stop, 10000, Mock())
+    report.assert_called_once()
+    assert report.call_args.args[:2] == ("", "读取与解析群消息")
+    assert isinstance(report.call_args.args[2], KeyError)
+    with sqlite3.connect(tmp_path / "visual_sync.sqlite3") as db:
+        assert db.execute("SELECT cursor FROM progress").fetchone() == (10000,)
+
+
+def test_send_api_preserves_unavailable_error_code(monkeypatch):
+    """从飞书原始业务响应提取收件人不可见错误码。"""
+    import httpx
+    from app.feishu import FeishuAPIError, FeishuClient
+
+    monkeypatch.setattr(httpx, "request", Mock(return_value=httpx.Response(400, json={"code": 230013})))
+    with pytest.raises(FeishuAPIError) as failure:
+        FeishuClient._request("POST", "/im/v1/messages", retry_transient=False)
+    assert (failure.value.path, failure.value.code) == ("/im/v1/messages", 230013)
