@@ -17,8 +17,8 @@ from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from app.config import ROOT, Settings
-from app.feishu import FeishuAPIError, FeishuClient
-from app.notifications import alert_open_id, escape_text, load_notifications, red_card, send_error
+from app.feishu import FeishuClient
+from app.notifications import alert_open_id, escape_text, send_error
 from app.recommendation import product_owner
 from app.rules import plain
 
@@ -28,8 +28,8 @@ NOTIFY_MAX_ATTEMPTS = 3
 NOTIFY_RETRY_SECONDS = 30
 
 
-def listen_visual_events(settings, on_message):
-    """通过服务端 SDK 订阅群消息。参数 settings：飞书应用和目标群配置；on_message：接收目标群消息 ID 的回调。返回值：无，持续监听。"""
+def listen_visual_events(settings, on_message, on_connected):
+    """通过服务端 SDK 订阅群消息。参数 settings：飞书应用和目标群配置；on_message：接收目标群消息 ID 的回调；on_connected：首次连接或重连成功后的补读回调。返回值：无，持续监听。"""
     import lark_oapi as lark
 
     def received(data):
@@ -39,8 +39,14 @@ def listen_visual_events(settings, on_message):
             on_message(event.message.message_id)
 
     handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(received).build()
-    client = lark.ws.Client(settings.app_id, settings.app_secret, event_handler=handler,
-                            log_level=lark.LogLevel.WARNING)
+    class VisualEventClient(lark.ws.Client):
+        async def _connect(self):
+            """握手成功后触发补读，覆盖 SDK 的首次连接与内部自动重连。"""
+            await super()._connect()
+            on_connected()
+
+    client = VisualEventClient(settings.app_id, settings.app_secret, event_handler=handler,
+                               log_level=lark.LogLevel.WARNING)
     client.start()
 
 
@@ -53,10 +59,15 @@ def _event_worker(settings, wake, stop):
         logger.info("收到视觉群消息事件 %s", message_id)
         wake.set()
 
+    def connected():
+        """连接就绪后唤醒读取线程，补回连接建立之前的消息。"""
+        logger.info("视觉群长连接已就绪，准备补读")
+        wake.set()
+
     incident = str(uuid.uuid4())
     while not stop.is_set():
         try:
-            listen_visual_events(settings, notify)
+            listen_visual_events(settings, notify, connected)
             incident = str(uuid.uuid4())
         except Exception as exc:
             send_error("", "群消息长连接", exc, FeishuClient(settings), "视觉共享群监听", visual=True, incident=incident)
@@ -314,8 +325,8 @@ class VisualSync:
             cursors.add(token)
             params["page_token"] = token
 
-    def reminder_card(self, row, record, owner_id, body, *, unavailable=False):
-        """生成视觉需求私聊卡片。参数 row：已登记字段；record：记录 ID，空值链接到需求表；owner_id：通知应用下的负责人 Open ID；body：去掉人员提及的原文；unavailable：是否标注原负责人不可见。返回值：飞书卡片。"""
+    def reminder_card(self, row, record, owner_id, body):
+        """生成视觉需求私聊卡片。参数 row：已登记字段；record：记录 ID，空值链接到需求表；owner_id：通知应用下的负责人 Open ID；body：去掉人员提及的原文。返回值：飞书卡片。"""
         fields = self.config["fields"]
         code, name = row[fields["code"]], row[fields["name"]]
         kind = row.get(fields["kind"], "")
@@ -323,8 +334,7 @@ class VisualSync:
         lines = [f"**商品：** {escape_text(code + ' ' + name)}"]
         if body.strip():
             lines.append(f"**修改内容：**\n{escape_text(body, limit=None)}")
-        note = "（目标人员已不再可见）" if unavailable else ""
-        lines.extend([f'**负责人：** <at id="{owner_id}"></at>{note}', f'**视觉设计：** <at id="{designer}"></at>'])
+        lines.extend([f'**负责人：** <at id="{owner_id}"></at>', f'**视觉设计：** <at id="{designer}"></at>'])
         url = f"https://feishu.cn/base/{self.client.settings.base_token}?table={self.config['table']}"
         buttons = []
         source = row.get(fields["source_link"], {}).get("link")
@@ -336,26 +346,10 @@ class VisualSync:
             button = {"tag": "button", "text": {"tag": "plain_text", "content": label}, "type": "default",
                       "behaviors": [{"type": "open_url", "default_url": link}]}
             columns.append({"tag": "column", "width": "auto", "elements": [button]})
-        card = {"schema": "2.0",
+        return {"schema": "2.0",
                 "header": {"template": "purple", "title": {"tag": "plain_text", "content": f"数据包{kind} · 负责人提醒"}},
                 "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines)},
                                       {"tag": "column_set", "flex_mode": "none", "columns": columns}]}}
-
-        return red_card(card) if unavailable else card
-
-    def forward_unavailable(self, row, record, owner_id, body, key):
-        """功能说明：向配置的接手人转发红卡。参数 row：登记字段；record：记录 ID；owner_id：原负责人；body：原文；key：登记幂等键。返回值：飞书消息 ID。"""
-        path = self.client.settings.fields_path.parent / "notifications.toml"
-        config = load_notifications(path, "visual_owner_unavailable")
-        recipients = [p for p in config.get("recipients", []) if p["enabled"]]
-        if len(recipients) != 1:
-            raise ValueError("视觉群负责人不可见时需配置一个接手人")
-        recipient = recipients[0]
-        card = self.reminder_card(row, record, owner_id, body, unavailable=True)
-        transfer_key = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{key}/{recipient['open_id']}"))
-        receipt = self.bot.send_card(recipient["open_id"], card, transfer_key, retry_transient=False)
-        logger.info("不可见负责人提醒已转发 接收人=%s record=%s", recipient["name"], record)
-        return receipt
 
     def register_images(self, db, message):
         """保存待同步图片。参数 db：同步状态库；message：命中需求的群消息。返回值：无，随需求一起提交。"""
@@ -392,6 +386,8 @@ class VisualSync:
                     db.execute("UPDATE jobs SET record=? WHERE id=?", (record, key))
                     db.commit()
             except Exception as exc:
+                db.execute("UPDATE jobs SET notify_after=? WHERE id=?", (time.time() + NOTIFY_RETRY_SECONDS, key))
+                db.commit()
                 logger.exception("视觉需求登记失败，下轮继续 id=%s", key)
                 send_error(record or "", "视觉需求登记", exc, self.client, f"视觉需求 {key}",
                            visual=True, table_id=self.config["table"], incident=f"{key}/register/{type(exc).__name__}")
@@ -400,13 +396,13 @@ class VisualSync:
             # 先持久化尝试，再请求飞书；即使进程在等待回执时退出，也保留次数与发送间隔。
             claim = db.execute(
                 "UPDATE jobs SET notify_attempts=notify_attempts+1, notify_after=? "
-                "WHERE id=? AND sent=0 AND notify_attempts < ? AND notify_after <= ? RETURNING notify_attempts, unavailable_owner",
+                "WHERE id=? AND sent=0 AND notify_attempts < ? AND notify_after <= ? RETURNING notify_attempts",
                 (time.time() + NOTIFY_RETRY_SECONDS, key, NOTIFY_MAX_ATTEMPTS, time.time()),
             ).fetchone()
             db.commit()
             if claim is None:
                 continue
-            attempt, unavailable_owner = claim
+            attempt, = claim
             try:
                 settings = self.client.settings
                 if self.bot is None:
@@ -419,20 +415,9 @@ class VisualSync:
                     notification_body = message_text(original, include_mentions=False)
                     db.execute("UPDATE jobs SET notification_body=? WHERE id=?", (notification_body, key))
                     db.commit()
-                if not unavailable_owner:
-                    recipient = alert_open_id(row[fields["owner"]][0]["id"], self.client, self.bot)
-                    card = self.reminder_card(row, record, recipient, notification_body)
-                    try:
-                        message_id = self.bot.send_card(recipient, card, key, retry_transient=False)
-                    except FeishuAPIError as exc:
-                        if (exc.path, exc.code) != ("/im/v1/messages", 230013):
-                            raise
-                        unavailable_owner = recipient
-                        db.execute("UPDATE jobs SET unavailable_owner=? WHERE id=?", (recipient, key))
-                        db.commit()
-                        logger.warning("负责人对机器人不可见，转交通知 record=%s", record)
-                if unavailable_owner:
-                    message_id = self.forward_unavailable(row, record, unavailable_owner, notification_body, key)
+                recipient = alert_open_id(row[fields["owner"]][0]["id"], self.client, self.bot)
+                card = self.reminder_card(row, record, recipient, notification_body)
+                message_id = self.bot.send_card(recipient, card, key, retry_transient=False)
                 db.execute("UPDATE jobs SET sent=1 WHERE id=?", (key,))
                 db.commit()
                 logger.info("视觉需求已登记并提醒 %s record=%s message=%s", row[fields["code"]], record, message_id)
@@ -441,7 +426,7 @@ class VisualSync:
                 db.commit()
                 outcome = "停止重试" if attempt == NOTIFY_MAX_ATTEMPTS else "30 秒后重试"
                 logger.exception("视觉需求通知失败 %s/%s，%s record=%s", attempt, NOTIFY_MAX_ATTEMPTS, outcome, record)
-                stage = "转交负责人提醒" if unavailable_owner else "发送负责人提醒"
+                stage = "发送负责人提醒"
                 send_error(record, stage, exc, self.client, title=row.get(fields["code"]),
                            visual=True, table_id=self.config["table"],
                            incident=f"{key}/{stage}/{type(exc).__name__}/{getattr(exc, 'code', '')}")
@@ -454,8 +439,6 @@ class VisualSync:
                    "PRIMARY KEY (message, image))")
         columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
         db.execute("CREATE TABLE IF NOT EXISTS owner_rotation (owner TEXT PRIMARY KEY, last_member TEXT NOT NULL)")
-        if "unavailable_owner" not in columns:
-            db.execute("ALTER TABLE jobs ADD COLUMN unavailable_owner TEXT")
         if "notification_body" not in columns:
             db.execute("ALTER TABLE jobs ADD COLUMN notification_body TEXT")
         if "notify_attempts" not in columns:
@@ -464,7 +447,7 @@ class VisualSync:
             db.execute("ALTER TABLE jobs ADD COLUMN notify_after REAL NOT NULL DEFAULT 0")
 
     def poll(self, stop, started, wake):
-        """功能说明：轮询启动后的消息。参数 stop：退出信号；started：本次服务启动毫秒；wake：目标群新消息信号。返回值：无。"""
+        """功能说明：按连接和消息事件补读群历史，独立处理待重试任务。参数 stop：退出信号；started：首次启用的起始毫秒；wake：连接就绪或目标群新消息信号。返回值：无。"""
         path = self.client.settings.rules_cache_path.parent / "visual_sync.sqlite3"
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path) as db:
@@ -473,32 +456,36 @@ class VisualSync:
             chat = self.chat_id
             db.execute("INSERT OR IGNORE INTO progress VALUES (?,?)", (chat, started))
             db.commit()
+            # 启动后收到首次握手信号再补读，覆盖握手前的消息；已有任务可立即恢复。
+            read_pending = False
             read_incident = None
             while not stop.is_set():
-                try:
-                    start = db.execute("SELECT cursor FROM progress WHERE chat=?", (chat,)).fetchone()[0]
-                    end = int(time.time() * 1000) - 3000
-                    if end > start:
-                        self.catalog = None
-                        for message in self.messages(start, end):
-                            rows = self.queue_message(db, message)
-                            logger.info("视觉群消息 %s 新增 %d 款", message["message_id"], len(rows))
-                        db.execute("UPDATE progress SET cursor=? WHERE chat=?", (end, chat))
-                        db.commit()
-                    read_incident = None
-                except Exception as exc:
-                    db.rollback()
-                    logger.exception("视觉群读取失败，将从当前进度重试")
-                    read_incident = read_incident or str(uuid.uuid4())
-                    send_error("", "读取与解析群消息", exc, self.client, title="视觉共享群同步",
-                               visual=True, incident=read_incident)
+                if read_pending:
+                    try:
+                        start = db.execute("SELECT cursor FROM progress WHERE chat=?", (chat,)).fetchone()[0]
+                        end = int(time.time() * 1000) - 3000
+                        if end > start:
+                            self.catalog = None
+                            for message in self.messages(start, end):
+                                rows = self.queue_message(db, message)
+                                logger.info("视觉群消息 %s 新增 %d 款", message["message_id"], len(rows))
+                            db.execute("UPDATE progress SET cursor=? WHERE chat=?", (end, chat))
+                            db.commit()
+                        read_incident = None
+                    except Exception as exc:
+                        db.rollback()
+                        logger.exception("视觉群读取失败，下次触发从当前进度补读")
+                        read_incident = read_incident or str(uuid.uuid4())
+                        send_error("", "读取与解析群消息", exc, self.client, title="视觉共享群同步",
+                                   visual=True, incident=read_incident)
                 self.deliver(db)
                 next_retry, = db.execute(
-                    "SELECT MIN(notify_after) FROM jobs WHERE sent=0 AND notify_attempts BETWEEN 1 AND ?",
-                    (NOTIFY_MAX_ATTEMPTS - 1,),
+                    "SELECT MIN(notify_after) FROM jobs WHERE sent=0 AND notify_attempts < ?",
+                    (NOTIFY_MAX_ATTEMPTS,),
                 ).fetchone()
-                wait = min(30, max(0, next_retry - time.time())) if next_retry is not None else 30
-                if wake.wait(wait):
+                wait = max(0, next_retry - time.time()) if next_retry is not None else None
+                read_pending = wake.wait(wait)
+                if read_pending:
                     wake.clear()
                     # 历史接口按秒分页，等到消息进入上面的三秒可读窗口再取。
                     stop.wait(3.1)
@@ -526,6 +513,7 @@ def start_visual_sync(settings):
                 send_error("", "视觉群处理线程", exc, worker.client, "视觉共享群同步",
                            visual=True, incident=incident)
                 stop.wait(30)
+                wake.set()
 
     threading.Thread(target=run, name="visual-sync", daemon=True).start()
     logger.info("视觉共享群服务端事件监听与历史补读已启动")

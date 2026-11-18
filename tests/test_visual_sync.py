@@ -1,11 +1,12 @@
 """验证群消息预览、启动边界与登记后的提醒重试。"""
 
+import asyncio
 import json
 import sqlite3
 
 import pytest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from app.visual_sync import VisualSync, message_text
 
@@ -87,8 +88,13 @@ def test_restart_retries_notification_without_second_record(tmp_path, monkeypatc
     monkeypatch.setattr("app.visual_sync.time.time", lambda: now)
     for now, count in [(20, 1), (49, 1), (50, 2), (79, 2), (80, 3), (110, 3)]:
         stop = Mock()
-        stop.is_set.side_effect = [False, True]
-        worker.poll(stop, 10000, Mock())
+        stop.is_set.side_effect = [False, False, True] if now == 20 else [False, True]
+        wake = Mock()
+        wake.wait.side_effect = [True, False] if now == 20 else [False]
+        worker.poll(stop, 10000, wake)
+        assert worker.messages.call_count == 1
+        if now >= 80:
+            wake.wait.assert_called_once_with(None)
         assert worker.bot.send_card.call_count == count
         assert report.call_args.args[:2] == ("record", "发送负责人提醒")
     assert worker.messages.call_args_list[0].args == (10000, 17000)
@@ -113,13 +119,24 @@ def test_server_event_only_wakes_for_target_group_users(monkeypatch):
     import lark_oapi as lark
     from app.visual_sync import listen_visual_events
 
-    connection = Mock()
-    monkeypatch.setattr(lark.ws, "Client", connection)
-    received = Mock()
+    def init_client(client, *_args, event_handler, **_kwargs):
+        """保留真实的事件分发器，隔离 SDK 后台缓存和网络连接。"""
+        client._event_handler = event_handler
+
+    instances = []
+    monkeypatch.setattr(lark.ws.Client, "__init__", init_client)
+    connect = AsyncMock()
+    monkeypatch.setattr(lark.ws.Client, "_connect", connect)
+    monkeypatch.setattr(lark.ws.Client, "start", lambda self: instances.append(self))
+    received, connected = Mock(), Mock()
     settings = SimpleNamespace(app_id="app", app_secret="secret", visual_sync_chat_id="oc_test")
-    listen_visual_events(settings, received)
-    connection.return_value.start.assert_called_once()
-    handler = connection.call_args.kwargs["event_handler"]
+    listen_visual_events(settings, received, connected)
+    client, = instances
+    connected.assert_not_called()
+    for _ in range(2):
+        asyncio.run(client._connect())
+    assert connected.call_count == connect.await_count == 2
+    handler = client._event_handler
     for chat, sender in [("oc_other", "user"), ("oc_test", "app"), ("oc_test", "user")]:
         payload = {"schema": "2.0", "header": {"event_type": "im.message.receive_v1"},
                    "event": {"sender": {"sender_type": sender}, "message": {"chat_id": chat, "message_id": "om_test"}}}
@@ -162,48 +179,29 @@ def test_message_images_keep_order_and_reuse_successful_uploads():
     assert [call.args[1] for call in worker.client.upload_message_image.call_args_list] == ["one", "two", "two"]
 
 
-def test_unavailable_owner_transfers_once_and_retries_only_forward(tmp_path, monkeypatch):
-    """负责人不可见后立刻转交。转交失败先报错，重开状态库仍只重试接手人。"""
+def test_unavailable_owner_alerts_without_forwarding(tmp_path, monkeypatch):
+    """旧任务带有转发标记时，也只向实际负责人发送并按普通错误告警。"""
     from app.feishu import FeishuAPIError
 
     worker = worker_with_catalog()
-    worker.client.settings = SimpleNamespace(fields_path=tmp_path / "fields.json", base_token="base")
-    (tmp_path / "notifications.toml").write_text(
-        '[visual_owner_unavailable]\nenabled=true\n[[visual_owner_unavailable.recipients]]\n'
-        'name="接手人"\nopen_id="ou_backup"\nenabled=true\n')
+    worker.client.settings = SimpleNamespace(base_token="base")
     monkeypatch.setattr("app.visual_sync.alert_open_id", lambda uid, *_: f"ou_{uid}")
-    error = Mock()
-    monkeypatch.setattr("app.visual_sync.send_error", error)
-    unavailable = FeishuAPIError("机器人不可见", "/im/v1/messages", 230013)
+    report = Mock()
+    monkeypatch.setattr("app.visual_sync.send_error", report)
     worker.bot = Mock()
-    worker.bot.send_card.side_effect = [unavailable, unavailable, "om_ok"]
+    worker.bot.send_card.side_effect = FeishuAPIError("负责人不可见", "/im/v1/messages", 230013)
     msg = message(worker, worker.config["always_mention"], "ABC1234 帽子 数据包已完成")
-    row = preview(worker, msg)[0]
-    path = tmp_path / "jobs.sqlite3"
-    with sqlite3.connect(path) as db:
+    with sqlite3.connect(":memory:") as db:
         worker.prepare_jobs(db)
-        db.execute("INSERT INTO jobs(id, payload, record, notification_body) VALUES(?,?,?,?)",
-                   ("job", json.dumps(row), "rec", "原文"))
+        worker.queue_message(db, msg)
+        db.execute("ALTER TABLE jobs ADD COLUMN unavailable_owner TEXT")
+        db.execute("UPDATE jobs SET record='rec', unavailable_owner='ou_old'")
         worker.deliver(db)
-    error.assert_called_once()
-    assert error.call_args.args[:2] == ("rec", "转交负责人提醒")
-    with sqlite3.connect(path) as db:
-        db.execute("UPDATE jobs SET notify_after=0")
-        worker.deliver(db)
-        worker.deliver(db)
-        assert db.execute("SELECT sent, unavailable_owner FROM jobs").fetchone() == (1, "ou_a")
-    original, forward, retry = worker.bot.send_card.call_args_list
-    assert original.args[0] == "ou_a" and forward.args[0] == "ou_backup"
-    assert original.args[2] != forward.args[2] and forward == retry
-    card = forward.args[1]
-    assert card["header"]["template"] == "red"
-    panel, = card["body"]["elements"]
-    assert panel["background_style"] == "red-50"
-    markdown, buttons = panel["columns"][0]["elements"]
-    assert '**负责人：** <at id="ou_a"></at>（目标人员已不再可见）' in markdown["content"]
-    assert '**视觉设计：** <at id="ou_designer"></at>' in markdown["content"]
-    assert len(buttons["columns"]) == 2
-    worker.client.create_visual_record.assert_not_called()
+        assert db.execute("SELECT sent, notify_attempts FROM jobs").fetchone() == (0, 1)
+    worker.bot.send_card.assert_called_once()
+    assert worker.bot.send_card.call_args.args[0] == "ou_a"
+    report.assert_called_once()
+    assert report.call_args.args[:2] == ("rec", "发送负责人提醒")
 
 
 def test_program_error_in_message_parsing_alerts_immediately(tmp_path, monkeypatch):
@@ -212,7 +210,7 @@ def test_program_error_in_message_parsing_alerts_immediately(tmp_path, monkeypat
     worker.client.settings.rules_cache_path = tmp_path / "rules.json"
     worker.messages = Mock(return_value=[{}])
     stop = Mock()
-    stop.is_set.side_effect = [False, True]
+    stop.is_set.side_effect = [False, False, True]
     report = Mock()
     monkeypatch.setattr("app.visual_sync.send_error", report)
     worker.poll(stop, 10000, Mock())
