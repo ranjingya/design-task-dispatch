@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from app.config import ROOT, Settings
 from app.feishu import FeishuClient
-from app.notifications import alert_open_id
+from app.notifications import alert_open_id, escape_text
 from app.recommendation import product_owner
 from app.rules import plain
 
@@ -112,7 +112,7 @@ def demand_type(text, config):
 
 
 def products(text, config):
-    """功能说明：按商品段落提取独立款及组合。参数 text：消息正文；config：匹配规则。返回值：货号、品名及该款需求类型序列。"""
+    """功能说明：按商品段落提取独立款及组合。参数 text：消息正文；config：匹配规则。返回值：货号、品名、需求类型及本款原文说明序列。"""
     sections = []
     header = []
     pattern = re.compile(config["code_pattern"])
@@ -137,17 +137,19 @@ def products(text, config):
             cut = re.search(r"\s{2,}|[（(](?:公司级别|检测报告未出)|数据包|(?:主图|详情页?|模特图|文案|充绒量|数据成分|检测报告)(?=.{0,12}(?:" + config["change_pattern"] + r"))|"
                             + config["new_pattern"] + "|" + config["change_pattern"], title)
             name = (title[:cut.start()] if cut else title).strip(" -、+，:：\\（(")
-            sections.append((codes, name, [line]))
+            sections.append((codes, name, [line], title[cut.start():].strip() if cut else ""))
         elif sections:
             sections[-1][2].append(line)
         else:
             header.append(line)
     seen = set()
-    for codes, name, lines in sections:
+    for codes, name, lines, detail in sections:
         key = (" ".join(codes), name)
         if key not in seen:
             seen.add(key)
-            yield *key, demand_type("\n".join(lines), config) or demand_type("\n".join(header), config)
+            kind = demand_type("\n".join(lines), config) or demand_type("\n".join(header), config)
+            description = "\n".join(part for part in [*header, detail, *lines[1:]] if part)
+            yield *key, kind, description
 
 
 class VisualSync:
@@ -228,7 +230,7 @@ class VisualSync:
         analysis_text = body
         for mention in message.get("mentions", []):
             analysis_text = analysis_text.replace("@" + mention["name"], "")
-        for codes, name, kind in products(analysis_text, cfg):
+        for codes, name, kind, _ in products(analysis_text, cfg):
             if not kind and cfg["always_mention"] not in mentions:
                 continue
             name, owner_id = self.resolve(codes, name)
@@ -268,6 +270,34 @@ class VisualSync:
             cursors.add(token)
             params["page_token"] = token
 
+    def reminder_card(self, row, record, owner_id):
+        """生成视觉需求私聊卡片。参数 row：已登记字段；record：记录 ID，空值链接到需求表；owner_id：通知应用下的负责人 Open ID。返回值：飞书卡片。"""
+        fields = self.config["fields"]
+        code, name = row[fields["code"]], row[fields["name"]]
+        kind = row.get(fields["kind"], "")
+        matches = [(n, detail) for codes, n, _, detail in products(row[fields["body"]], self.config) if codes == code]
+        detail = next((d for n, d in matches if n == name), matches[0][1] if len(matches) == 1 else "")
+        designer = alert_open_id(row[fields["sender"]][0]["id"], self.client, self.bot)
+        lines = [f"**商品：** {escape_text(code + ' ' + name)}"]
+        if detail:
+            lines.append(f"**修改内容：** {escape_text(detail)}")
+        lines.extend([f'**负责人：** <at id="{owner_id}"></at>', f'**视觉设计：** <at id="{designer}"></at>'])
+        url = f"https://feishu.cn/base/{self.client.settings.base_token}?table={self.config['table']}"
+        buttons = []
+        source = row.get(fields["source_link"], {}).get("link")
+        if source:
+            buttons.append(("查看原消息", source))
+        buttons.append(("查看需求", f"{url}&record={record}") if record else ("查看需求表", url))
+        columns = []
+        for label, link in buttons:
+            button = {"tag": "button", "text": {"tag": "plain_text", "content": label}, "type": "default",
+                      "behaviors": [{"type": "open_url", "default_url": link}]}
+            columns.append({"tag": "column", "width": "auto", "elements": [button]})
+        return {"schema": "2.0",
+                "header": {"template": "purple", "title": {"tag": "plain_text", "content": f"数据包{kind} · 负责人提醒"}},
+                "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines)},
+                                      {"tag": "column_set", "flex_mode": "none", "columns": columns}]}}
+
     def deliver(self, db):
         """功能说明：登记待处理款并通知负责人。参数 db：本地同步状态库。返回值：无，逐步保存记录及提醒结果。"""
         fields = self.config["fields"]
@@ -282,12 +312,6 @@ class VisualSync:
                     record = self.client.create_visual_record(self.config["table"], row, key)
                     db.execute("UPDATE jobs SET record=? WHERE id=?", (record, key))
                     db.commit()
-                url = f"https://feishu.cn/base/{self.client.settings.base_token}?table={self.config['table']}&record={record}"
-                title = row.get(fields["kind"], "数据包通知")
-                label = f"{row[fields['code']]} {row[fields['name']]}"
-                card = {"schema": "2.0", "header": {"title": {"tag": "plain_text", "content": title}},
-                        "body": {"elements": [{"tag": "div", "text": {"tag": "plain_text", "content": label}},
-                                              {"tag": "markdown", "content": f"[查看需求记录]({url})"}]}}
             except Exception:
                 logger.exception("视觉需求登记失败，下轮继续 id=%s", key)
                 continue
@@ -307,10 +331,11 @@ class VisualSync:
                     self.bot = FeishuClient(replace(settings, app_id=settings.alert_app_id,
                                                     app_secret=settings.alert_app_secret))
                 recipient = alert_open_id(row[fields["owner"]][0]["id"], self.client, self.bot)
+                card = self.reminder_card(row, record, recipient)
                 message_id = self.bot.send_card(recipient, card, key, retry_transient=False)
                 db.execute("UPDATE jobs SET sent=1 WHERE id=?", (key,))
                 db.commit()
-                logger.info("视觉需求已登记并提醒 %s record=%s message=%s", label, record, message_id)
+                logger.info("视觉需求已登记并提醒 %s record=%s message=%s", row[fields["code"]], record, message_id)
             except Exception:
                 db.execute("UPDATE jobs SET notify_after=? WHERE id=?", (time.time() + NOTIFY_RETRY_SECONDS, key))
                 db.commit()

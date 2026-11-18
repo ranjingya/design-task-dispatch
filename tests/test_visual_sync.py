@@ -88,6 +88,13 @@ def test_restart_retries_notification_without_second_record(tmp_path, monkeypatc
     assert calls[0] == calls[1] == calls[2]
     assert calls[0].args[0] == "ou_alert"
     assert calls[0].kwargs == {"retry_transient": False}
+    content, buttons = calls[0].args[1]["body"]["elements"]
+    assert '**负责人：** <at id="ou_alert"></at>' in content["content"]
+    assert '**视觉设计：** <at id="ou_alert"></at>' in content["content"]
+    assert "同步平台" not in content["content"]
+    assert "**修改内容：** 数据包已完成" in content["content"]
+    assert buttons["tag"] == "column_set" and buttons["flex_mode"] == "none"
+    assert [c["elements"][0]["text"]["content"] for c in buttons["columns"]] == ["查看原消息", "查看需求"]
     worker.client.send_card.assert_not_called()
     with sqlite3.connect(tmp_path / "visual_sync.sqlite3") as db:
         assert db.execute("SELECT sent, notify_attempts FROM jobs").fetchall() == [(int(third_succeeds), 3)]
