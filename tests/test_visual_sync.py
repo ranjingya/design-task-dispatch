@@ -7,7 +7,7 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from app.visual_sync import VisualSync
+from app.visual_sync import VisualSync, message_text
 
 
 def message(worker, who, text):
@@ -92,7 +92,7 @@ def test_restart_retries_notification_without_second_record(tmp_path, monkeypatc
     assert '**负责人：** <at id="ou_alert"></at>' in content["content"]
     assert '**视觉设计：** <at id="ou_alert"></at>' in content["content"]
     assert "同步平台" not in content["content"]
-    assert "**修改内容：** 数据包已完成" in content["content"]
+    assert "**修改内容：**\nABC1234帽子 数据包已完成" in content["content"]
     assert buttons["tag"] == "column_set" and buttons["flex_mode"] == "none"
     assert [c["elements"][0]["text"]["content"] for c in buttons["columns"]] == ["查看原消息", "查看需求"]
     worker.client.send_card.assert_not_called()
@@ -116,3 +116,38 @@ def test_server_event_only_wakes_for_target_group_users(monkeypatch):
                    "event": {"sender": {"sender_type": sender}, "message": {"chat_id": chat, "message_id": "om_test"}}}
         handler._do_without_validation(json.dumps(payload).encode())
     received.assert_called_once_with("om_test")
+
+def test_notification_body_keeps_paths_links_and_plain_at_characters():
+    raw = {"title": "素材", "content": [
+        [{"tag": "img", "image_key": "sample"}],
+        [{"tag": "text", "text": "ABC1234 帽子 主图更新"}],
+        [{"tag": "text", "text": r"Y:\设计\帽子"}, {"tag": "at", "user_id": "@_user_1"},
+         {"tag": "text", "text": " 请发到 art@example.com"}],
+        [{"tag": "a", "text": "脚本", "href": "https://example.com/script"}],
+    ]}
+    msg = {"msg_type": "post", "body": {"content": json.dumps(raw)},
+           "mentions": [{"key": "@_user_1", "name": "设计"}]}
+    text = message_text(msg, include_mentions=False)
+    assert "ABC1234 帽子 主图更新" in text
+    assert r"Y:\设计\帽子 请发到 art@example.com" in text
+    assert "脚本 https://example.com/script" in text
+    assert "@设计" not in text and "sample" not in text
+
+
+def test_message_images_keep_order_and_reuse_successful_uploads():
+    worker = worker_with_catalog()
+    body = {"content": [[{"tag": "img", "image_key": key}] for key in ("one", "two", "one")]}
+    body["content_v2"] = body["content"]
+    msg = {"message_id": "om_source", "msg_type": "post", "body": {"content": json.dumps(body)}}
+    worker.client.upload_message_image.side_effect = ["first", RuntimeError("模拟上传失败"), "second"]
+    with sqlite3.connect(":memory:") as db:
+        worker.prepare_jobs(db)
+        worker.register_images(db, msg)
+        db.commit()
+        with pytest.raises(RuntimeError, match="模拟上传失败"):
+            worker.attach_images(db, "om_source", {})
+        for _ in range(2):
+            row = {}
+            worker.attach_images(db, "om_source", row)
+            assert row["消息附件"] == [{"file_token": "first"}, {"file_token": "second"}]
+    assert [call.args[1] for call in worker.client.upload_message_image.call_args_list] == ["one", "two", "two"]

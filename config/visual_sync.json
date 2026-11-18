@@ -10,6 +10,6 @@
   "fields": {
     "code": "货号", "name": "品名", "body": "修改信息", "kind": "需求类型",
     "owner": "负责人", "platform": "同步平台", "sender": "视觉设计", "date": "发布时间",
-    "source_link": "原消息链接"
+    "source_link": "原消息链接", "attachments": "消息附件"
   }
 }

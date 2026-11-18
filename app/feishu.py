@@ -1,12 +1,14 @@
 """飞书应用身份认证及多维表记录读写。"""
 
 import logging
+from io import BytesIO
 import json
 import threading
 import time
 from urllib.parse import quote
 
 import httpx
+from PIL import Image, UnidentifiedImageError
 
 from app.config import Settings
 
@@ -133,6 +135,34 @@ class FeishuClient:
         if type(value) is not int or value <= 0:
             raise ValueError('需求创建时间不可用，请明确关联运营记录')
         return value
+
+    def upload_message_image(self, message_id, image_key):
+        """把群消息原图上传到目标多维表。参数 message_id：原消息 ID；image_key：该消息内的图片键。返回值：附件素材令牌。"""
+        path = f"/im/v1/messages/{quote(message_id, safe='')}/resources/{quote(image_key, safe='')}"
+        content = self._download(API + path, 100 * 1024 * 1024, {"type": "image"})
+        try:
+            with Image.open(BytesIO(content)) as image:
+                extension = image.format.lower()
+                mime = Image.MIME.get(image.format, "application/octet-stream")
+        except UnidentifiedImageError:
+            extension, mime = "bin", "application/octet-stream"
+        name = f"{image_key}.{extension}"
+        upload = {"file_name": name, "parent_type": "bitable_image",
+                  "parent_node": self.settings.base_token, "size": len(content)}
+        headers = {"Authorization": f"Bearer {self._access_token()}"}
+        path = "/drive/v1/medias/"
+        if len(content) <= 20 * 1024 * 1024:
+            result = self._request("POST", path + "upload_all", headers=headers,
+                                   data={**upload, "size": str(len(content))}, files={"file": (name, content, mime)})
+        else:
+            plan = self._request("POST", path + "upload_prepare", headers=headers, json=upload)["data"]
+            for seq, offset in enumerate(range(0, len(content), plan["block_size"])):
+                part = memoryview(content)[offset:offset + plan["block_size"]].tobytes()
+                self._request("POST", path + "upload_part", headers=headers, files={"file": (name, part, mime)},
+                              data={"upload_id": plan["upload_id"], "seq": str(seq), "size": str(len(part))})
+            result = self._request("POST", path + "upload_finish", headers=headers,
+                                   json={"upload_id": plan["upload_id"], "block_num": plan["block_num"]})
+        return result["data"]["file_token"]
 
     def create_visual_record(self, table_id, fields, client_token):
         """功能说明：幂等新增视觉需求。参数 table_id：目标表；fields：记录字段；client_token：本款处理标识。返回值：飞书记录 ID。"""

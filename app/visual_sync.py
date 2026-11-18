@@ -80,24 +80,33 @@ def message_link(message):
     return None
 
 
-def message_text(message):
-    """功能说明：还原消息的可读正文。参数 message：群消息。返回值：保留原有换行和提及的文字。"""
+def message_text(message, *, include_mentions=True):
+    """功能说明：还原消息的可读正文。参数 message：群消息；include_mentions：是否还原人员提及。返回值：消息文字、链接和原有分段。"""
     body = json.loads(message["body"]["content"])
-    mentions = {item["key"]: "@" + item["name"] for item in message.get("mentions", [])}
+    mentions = {item["key"]: ("@" + item["name"] if include_mentions else "") for item in message.get("mentions", [])}
     if message["msg_type"] == "text":
         return re.sub(r"@_user_\d+", lambda m: mentions.get(m[0], m[0]), body["text"])
     lines = [body["title"]] if body.get("title") else []
-    for paragraph in body.get("content", []):
+    for paragraph in body.get("content", body.get("content_v2", [])):
         pieces = []
         for node in paragraph:
             if node["tag"] == "at":
-                pieces.append(mentions.get(node.get("user_id"), "@" + node.get("user_name", "")))
+                if include_mentions:
+                    pieces.append(mentions.get(node.get("user_id"), "@" + node.get("user_name", "")))
             elif node["tag"] == "a" and node.get("href") != node.get("text"):
                 pieces.append(f"{node.get('text', '')} {node.get('href', '')}")
             else:
                 pieces.append(node.get("text", ""))
         lines.append("".join(pieces))
     return "\n".join(lines).strip("\n")
+
+
+def message_image_keys(message):
+    """按群消息原始顺序读取图片键，并合并同一张图片的重复引用。"""
+    body = json.loads(message["body"]["content"])
+    paragraphs = body.get("content", body.get("content_v2", [])) if message["msg_type"] == "post" else []
+    return list(dict.fromkeys(node["image_key"] for paragraph in paragraphs for node in paragraph
+                              if node.get("tag") == "img" and node.get("image_key")))
 
 
 def demand_type(text, config):
@@ -112,7 +121,7 @@ def demand_type(text, config):
 
 
 def products(text, config):
-    """功能说明：按商品段落提取独立款及组合。参数 text：消息正文；config：匹配规则。返回值：货号、品名、需求类型及本款原文说明序列。"""
+    """功能说明：按商品段落提取独立款及组合。参数 text：消息正文；config：匹配规则。返回值：货号、品名及需求类型序列。"""
     sections = []
     header = []
     pattern = re.compile(config["code_pattern"])
@@ -137,19 +146,18 @@ def products(text, config):
             cut = re.search(r"\s{2,}|[（(](?:公司级别|检测报告未出)|数据包|(?:主图|详情页?|模特图|文案|充绒量|数据成分|检测报告)(?=.{0,12}(?:" + config["change_pattern"] + r"))|"
                             + config["new_pattern"] + "|" + config["change_pattern"], title)
             name = (title[:cut.start()] if cut else title).strip(" -、+，:：\\（(")
-            sections.append((codes, name, [line], title[cut.start():].strip() if cut else ""))
+            sections.append((codes, name, [line]))
         elif sections:
             sections[-1][2].append(line)
         else:
             header.append(line)
     seen = set()
-    for codes, name, lines, detail in sections:
+    for codes, name, lines in sections:
         key = (" ".join(codes), name)
         if key not in seen:
             seen.add(key)
             kind = demand_type("\n".join(lines), config) or demand_type("\n".join(header), config)
-            description = "\n".join(part for part in [*header, detail, *lines[1:]] if part)
-            yield *key, kind, description
+            yield *key, kind
 
 
 class VisualSync:
@@ -227,10 +235,7 @@ class VisualSync:
         date = date.replace(hour=0, minute=0, second=0, microsecond=0)
         rows = []
         link = message_link(message)
-        analysis_text = body
-        for mention in message.get("mentions", []):
-            analysis_text = analysis_text.replace("@" + mention["name"], "")
-        for codes, name, kind, _ in products(analysis_text, cfg):
+        for codes, name, kind in products(message_text(message, include_mentions=False), cfg):
             if not kind and cfg["always_mention"] not in mentions:
                 continue
             name, owner_id = self.resolve(codes, name)
@@ -270,17 +275,15 @@ class VisualSync:
             cursors.add(token)
             params["page_token"] = token
 
-    def reminder_card(self, row, record, owner_id):
-        """生成视觉需求私聊卡片。参数 row：已登记字段；record：记录 ID，空值链接到需求表；owner_id：通知应用下的负责人 Open ID。返回值：飞书卡片。"""
+    def reminder_card(self, row, record, owner_id, body):
+        """生成视觉需求私聊卡片。参数 row：已登记字段；record：记录 ID，空值链接到需求表；owner_id：通知应用下的负责人 Open ID；body：去掉人员提及的原文。返回值：飞书卡片。"""
         fields = self.config["fields"]
         code, name = row[fields["code"]], row[fields["name"]]
         kind = row.get(fields["kind"], "")
-        matches = [(n, detail) for codes, n, _, detail in products(row[fields["body"]], self.config) if codes == code]
-        detail = next((d for n, d in matches if n == name), matches[0][1] if len(matches) == 1 else "")
         designer = alert_open_id(row[fields["sender"]][0]["id"], self.client, self.bot)
         lines = [f"**商品：** {escape_text(code + ' ' + name)}"]
-        if detail:
-            lines.append(f"**修改内容：** {escape_text(detail)}")
+        if body.strip():
+            lines.append(f"**修改内容：**\n{escape_text(body, limit=None)}")
         lines.extend([f'**负责人：** <at id="{owner_id}"></at>', f'**视觉设计：** <at id="{designer}"></at>'])
         url = f"https://feishu.cn/base/{self.client.settings.base_token}?table={self.config['table']}"
         buttons = []
@@ -298,17 +301,37 @@ class VisualSync:
                 "body": {"elements": [{"tag": "markdown", "content": "\n".join(lines)},
                                       {"tag": "column_set", "flex_mode": "none", "columns": columns}]}}
 
+    def register_images(self, db, message):
+        """保存待同步图片。参数 db：同步状态库；message：命中需求的群消息。返回值：无，随需求一起提交。"""
+        db.executemany("INSERT OR IGNORE INTO message_images (message, image, position) VALUES (?,?,?)",
+                       [(message["message_id"], key, index) for index, key in enumerate(message_image_keys(message))])
+
+    def attach_images(self, db, message_id, row):
+        """填充待登记记录的附件。参数 db：同步状态库；message_id：原消息 ID；row：待填写的记录字段。返回值：无。"""
+        attachments = []
+        for image, token in db.execute("SELECT image, token FROM message_images WHERE message=? ORDER BY position",
+                                       (message_id,)).fetchall():
+            if not token:
+                token = self.client.upload_message_image(message_id, image)
+                db.execute("UPDATE message_images SET token=? WHERE message=? AND image=?", (token, message_id, image))
+                db.commit()
+                logger.info("视觉群图片已上传 message=%s image=%s", message_id, image)
+            attachments.append({"file_token": token})
+        if attachments:
+            row[self.config["fields"]["attachments"]] = attachments
+
     def deliver(self, db):
         """功能说明：登记待处理款并通知负责人。参数 db：本地同步状态库。返回值：无，逐步保存记录及提醒结果。"""
         fields = self.config["fields"]
         due = db.execute(
-            "SELECT id, payload, record FROM jobs WHERE sent=0 AND notify_attempts < ? AND notify_after <= ?",
+            "SELECT id, payload, record, source, notification_body FROM jobs WHERE sent=0 AND notify_attempts < ? AND notify_after <= ?",
             (NOTIFY_MAX_ATTEMPTS, time.time()),
         ).fetchall()
-        for key, payload, record in due:
+        for key, payload, record, source, notification_body in due:
             row = json.loads(payload)
             try:
                 if not record:
+                    self.attach_images(db, json.loads(source)[0], row)
                     record = self.client.create_visual_record(self.config["table"], row, key)
                     db.execute("UPDATE jobs SET record=? WHERE id=?", (record, key))
                     db.commit()
@@ -331,7 +354,14 @@ class VisualSync:
                     self.bot = FeishuClient(replace(settings, app_id=settings.alert_app_id,
                                                     app_secret=settings.alert_app_secret))
                 recipient = alert_open_id(row[fields["owner"]][0]["id"], self.client, self.bot)
-                card = self.reminder_card(row, record, recipient)
+                if notification_body is None:
+                    # 已有待发送任务按原消息 ID 恢复正文，以区分真实提及和普通的 @ 字符。
+                    source_id = json.loads(source)[0]
+                    original = self.client.material_get(f"/im/v1/messages/{source_id}")["items"][0]
+                    notification_body = message_text(original, include_mentions=False)
+                    db.execute("UPDATE jobs SET notification_body=? WHERE id=?", (notification_body, key))
+                    db.commit()
+                card = self.reminder_card(row, record, recipient, notification_body)
                 message_id = self.bot.send_card(recipient, card, key, retry_transient=False)
                 db.execute("UPDATE jobs SET sent=1 WHERE id=?", (key,))
                 db.commit()
@@ -346,7 +376,11 @@ class VisualSync:
     def prepare_jobs(db):
         """初始化通知状态并升级已有任务。参数 db：同步状态库。返回值：无。"""
         db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, source TEXT UNIQUE, payload TEXT, record TEXT, sent INTEGER DEFAULT 0)")
+        db.execute("CREATE TABLE IF NOT EXISTS message_images (message TEXT, image TEXT, position INTEGER, token TEXT, "
+                   "PRIMARY KEY (message, image))")
         columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+        if "notification_body" not in columns:
+            db.execute("ALTER TABLE jobs ADD COLUMN notification_body TEXT")
         if "notify_attempts" not in columns:
             db.execute("ALTER TABLE jobs ADD COLUMN notify_attempts INTEGER NOT NULL DEFAULT 0")
         if "notify_after" not in columns:
@@ -371,11 +405,14 @@ class VisualSync:
                         for message in self.messages(start, end):
                             rows = self.plan(message)
                             logger.info("视觉群消息 %s 匹配 %d 款", message["message_id"], len(rows))
+                            if rows:
+                                self.register_images(db, message)
                             for row in rows:
                                 fields = self.config["fields"]
                                 source = json.dumps([message["message_id"], row[fields["code"]], row[fields["name"]]])
-                                db.execute("INSERT OR IGNORE INTO jobs (id,source,payload) VALUES (?,?,?)",
-                                           (str(uuid.uuid4()), source, json.dumps(row, ensure_ascii=False)))
+                                db.execute("INSERT OR IGNORE INTO jobs (id,source,payload,notification_body) VALUES (?,?,?,?)",
+                                           (str(uuid.uuid4()), source, json.dumps(row, ensure_ascii=False),
+                                            message_text(message, include_mentions=False)))
                         db.execute("UPDATE progress SET cursor=? WHERE chat=?", (end, chat))
                         db.commit()
                 except Exception:

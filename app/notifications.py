@@ -49,9 +49,9 @@ def load_notifications(path, event="new_task"):
     return config
 
 
-def escape_text(value):
+def escape_text(value, *, limit=2000):
     """将用户输入作为文字显示，避免被解释为卡片标签或链接。"""
-    text = html.escape(plain(value)[:2000], quote=False)
+    text = html.escape(plain(value)[:limit], quote=False)
     return re.sub(r"([\\`*_{}\[\]()#+.!~|>-])", r"\\\1", text)
 
 
