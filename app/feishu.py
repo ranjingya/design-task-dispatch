@@ -281,10 +281,10 @@ class FeishuClient:
                 time.sleep(interval)
         raise RuntimeError("电子表格导出超时，请稍后重试")
 
-    def material_get(self, path: str, params: dict | None = None) -> dict:
-        """功能说明：读取在线材料的官方接口并区分访问错误。参数 path：官方 API 路径；params：查询参数。返回值：响应 data。"""
+    def material_get(self, path: str, params: dict | None = None, *, retry_transient: bool = True) -> dict:
+        """功能说明：读取在线材料的官方接口并区分访问错误。参数 path：官方 API 路径；params：查询参数；retry_transient：是否在本次读取内重试。返回值：响应 data。"""
         try:
-            return self._request("GET", path, params=params,
+            return self._request("GET", path, params=params, retry_transient=retry_transient,
                                  headers={"Authorization": f"Bearer {self._access_token()}"})["data"]
         except RuntimeError as exc:
             message = str(exc)

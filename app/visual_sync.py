@@ -24,8 +24,30 @@ from app.rules import plain
 
 logger = logging.getLogger(__name__)
 ZONE = ZoneInfo("Asia/Shanghai")
-NOTIFY_MAX_ATTEMPTS = 3
-NOTIFY_RETRY_SECONDS = 30
+RETRY_DELAYS = (30, 60, 120, 240)
+MAX_ATTEMPTS = len(RETRY_DELAYS) + 1
+
+
+def retry_at(attempt):
+    """根据当前尝试次数计算下次执行时间；次数用尽时返回空值。"""
+    return time.time() + RETRY_DELAYS[attempt - 1] if attempt < MAX_ATTEMPTS else None
+
+
+def retry_result(attempt):
+    """返回该次失败后的重试安排，供日志使用。"""
+    return f"{RETRY_DELAYS[attempt - 1]} 秒后重试" if attempt < MAX_ATTEMPTS else "停止自动重试"
+
+
+def claim_attempt(db, key, previous, *, registering):
+    """预占一次尝试。参数 db：状态库；key：任务标识；previous：该环节已有次数；registering：是否正在登记。返回值：是否取得执行权。"""
+    column = "register_attempts" if registering else "notify_attempts"
+    phase = "record IS NULL" if registering else "record IS NOT NULL"
+    # 提前落盘，使进程在等待外部回执时退出也会保留重试间隔和上限。
+    updated = db.execute(f"UPDATE jobs SET {column}={column}+1, retry_at=? WHERE id=? AND {phase} "
+                         f"AND sent=0 AND {column}=? AND retry_at<=?",
+                         (retry_at(previous + 1), key, previous, time.time())).rowcount
+    db.commit()
+    return bool(updated)
 
 
 def listen_visual_events(settings, on_message, on_connected):
@@ -321,7 +343,7 @@ class VisualSync:
         count = 0
         cursors = set()
         while True:
-            data = self.client.material_get("/im/v1/messages", params)
+            data = self.client.material_get("/im/v1/messages", params, retry_transient=False)
             for message in data["items"]:
                 if start is None or start <= int(message["create_time"]) < end:
                     yield message
@@ -385,38 +407,36 @@ class VisualSync:
         """功能说明：登记待处理款并通知负责人。参数 db：本地同步状态库。返回值：无，逐步保存记录及提醒结果。"""
         fields = self.config["fields"]
         due = db.execute(
-            "SELECT id, payload, record, source, notification_body FROM jobs WHERE sent=0 AND notify_attempts < ? AND notify_after <= ?",
-            (NOTIFY_MAX_ATTEMPTS, time.time()),
+            "SELECT id, payload, record, source, notification_body, register_attempts, notify_attempts "
+            "FROM jobs WHERE sent=0 AND retry_at<=?", (time.time(),),
         ).fetchall()
-        for key, payload, record, source, notification_body in due:
-            try:
-                row = json.loads(payload)
-                if not record:
+        for key, payload, record, source, notification_body, registrations, notifications in due:
+            if not record:
+                if not claim_attempt(db, key, registrations, registering=True):
+                    continue
+                attempt = registrations + 1
+                try:
+                    row = json.loads(payload)
                     self.attach_images(db, json.loads(source)[0], row)
                     record = self.client.create_visual_record(self.config["table"], row, key)
-                    db.execute("UPDATE jobs SET record=? WHERE id=?", (record, key))
+                    db.execute("UPDATE jobs SET record=?, retry_at=0 WHERE id=?", (record, key))
                     db.commit()
-            except Exception as exc:
-                db.execute("UPDATE jobs SET notify_after=? WHERE id=?", (time.time() + NOTIFY_RETRY_SECONDS, key))
-                db.commit()
-                logger.exception("视觉需求登记失败，下轮继续 id=%s", key)
-                send_error(record or "", "视觉需求登记", exc, self.client, f"视觉需求 {key}",
-                           visual=True, table_id=self.config["table"], incident=f"{key}/register/{type(exc).__name__}")
-                continue
+                except Exception as exc:
+                    db.execute("UPDATE jobs SET retry_at=? WHERE id=?", (retry_at(attempt), key))
+                    db.commit()
+                    logger.exception("[优化] 登记失败 第 %s/%s 次，%s id=%s", attempt, MAX_ATTEMPTS, retry_result(attempt), key)
+                    send_error("", "视觉需求登记", exc, self.client, f"视觉需求 {key}", visual=True,
+                               table_id=self.config["table"], incident=f"{key}/register/{type(exc).__name__}")
+                    continue
 
-            # 先持久化尝试，再请求飞书；即使进程在等待回执时退出，也保留次数与发送间隔。
-            claim = db.execute(
-                "UPDATE jobs SET notify_attempts=notify_attempts+1, notify_after=? "
-                "WHERE id=? AND sent=0 AND notify_attempts < ? AND notify_after <= ? RETURNING notify_attempts",
-                (time.time() + NOTIFY_RETRY_SECONDS, key, NOTIFY_MAX_ATTEMPTS, time.time()),
-            ).fetchone()
-            db.commit()
-            if claim is None:
+            if not claim_attempt(db, key, notifications, registering=False):
                 continue
-            attempt, = claim
+            attempt = notifications + 1
             owner = "待解析"
-            product = f"{row.get(fields['code'], '')} {row.get(fields['name'], '')}".strip()
+            product = key
             try:
+                row = json.loads(payload)
+                product = f"{row.get(fields['code'], '')} {row.get(fields['name'], '')}".strip()
                 owner_id = row[fields["owner"]][0]["id"]
                 owner = next((name for name, uid in self.members.items() if uid == owner_id), owner_id)
                 settings = self.client.settings
@@ -426,7 +446,7 @@ class VisualSync:
                 if notification_body is None:
                     # 已有待发送任务按原消息 ID 恢复正文，以区分真实提及和普通的 @ 字符。
                     source_id = json.loads(source)[0]
-                    original = self.client.material_get(f"/im/v1/messages/{source_id}")["items"][0]
+                    original = self.client.material_get(f"/im/v1/messages/{source_id}", retry_transient=False)["items"][0]
                     notification_body = message_text(original, include_mentions=False)
                     db.execute("UPDATE jobs SET notification_body=? WHERE id=?", (notification_body, key))
                     db.commit()
@@ -437,13 +457,12 @@ class VisualSync:
                 db.commit()
                 logger.info("[优化] 已发送 商品=%s 接收人=%s record=%s message=%s", product, owner, record, message_id)
             except Exception as exc:
-                db.execute("UPDATE jobs SET notify_after=? WHERE id=?", (time.time() + NOTIFY_RETRY_SECONDS, key))
+                db.execute("UPDATE jobs SET retry_at=? WHERE id=?", (retry_at(attempt), key))
                 db.commit()
-                outcome = "停止重试" if attempt == NOTIFY_MAX_ATTEMPTS else "30 秒后重试"
                 logger.exception("[优化] 发送失败 商品=%s 接收人=%s 第 %s/%s 次，%s record=%s",
-                                 product, owner, attempt, NOTIFY_MAX_ATTEMPTS, outcome, record)
+                                 product, owner, attempt, MAX_ATTEMPTS, retry_result(attempt), record)
                 stage = "发送负责人提醒"
-                send_error(record, stage, exc, self.client, title=row.get(fields["code"]),
+                send_error(record, stage, exc, self.client, title=product,
                            visual=True, table_id=self.config["table"],
                            incident=f"{key}/{stage}/{type(exc).__name__}/{getattr(exc, 'code', '')}")
 
@@ -459,8 +478,17 @@ class VisualSync:
             db.execute("ALTER TABLE jobs ADD COLUMN notification_body TEXT")
         if "notify_attempts" not in columns:
             db.execute("ALTER TABLE jobs ADD COLUMN notify_attempts INTEGER NOT NULL DEFAULT 0")
-        if "notify_after" not in columns:
-            db.execute("ALTER TABLE jobs ADD COLUMN notify_after REAL NOT NULL DEFAULT 0")
+        if "register_attempts" not in columns:
+            db.execute("ALTER TABLE jobs ADD COLUMN register_attempts INTEGER NOT NULL DEFAULT 0")
+        if "retry_at" not in columns:
+            db.execute("SAVEPOINT migrate_retry_at")
+            db.execute("ALTER TABLE jobs ADD COLUMN retry_at REAL DEFAULT 0")
+            if "notify_after" in columns:
+                # 保留升级前已停发的任务；在途通知按已经尝试的次数衔接新间隔。
+                db.execute("UPDATE jobs SET retry_at=CASE WHEN notify_attempts>=3 THEN NULL "
+                           "WHEN notify_attempts=2 THEN notify_after+? ELSE notify_after END WHERE sent=0",
+                           (RETRY_DELAYS[1] - 30,))
+            db.execute("RELEASE migrate_retry_at")
 
     def poll(self, stop, started, wake):
         """功能说明：按连接和消息事件补读群历史，独立处理待重试任务。参数 stop：退出信号；started：首次启用的起始毫秒；wake：连接就绪或目标群新消息信号。返回值：无。"""
@@ -472,45 +500,46 @@ class VisualSync:
             chat = self.chat_id
             db.execute("INSERT OR IGNORE INTO progress VALUES (?,?)", (chat, started))
             db.commit()
-            # 启动后收到首次握手信号再补读，覆盖握手前的消息；已有任务可立即恢复。
+            db.execute("CREATE TABLE IF NOT EXISTS read_retries (chat TEXT PRIMARY KEY, attempts INTEGER, retry_at REAL)")
             read_pending = False
-            read_delay = 0
-            read_retry_at = None
             while not stop.is_set():
-                if read_retry_at is not None:
-                    read_pending = time.monotonic() >= read_retry_at
+                retry = db.execute("SELECT attempts, retry_at FROM read_retries WHERE chat=?", (chat,)).fetchone()
+                # 活跃重试按保存的时间执行；次数用尽后，只响应下一轮外部事件。
+                if retry and retry[1] is not None:
+                    read_pending = time.time() >= retry[1]
                 if read_pending:
-                    try:
-                        start = db.execute("SELECT cursor FROM progress WHERE chat=?", (chat,)).fetchone()[0]
-                        end = int(time.time() * 1000) - 3000
-                        if end > start:
+                    start = db.execute("SELECT cursor FROM progress WHERE chat=?", (chat,)).fetchone()[0]
+                    end = int(time.time() * 1000) - 3000
+                    if end > start:
+                        attempt = retry[0] + 1 if retry and retry[1] is not None else 1
+                        db.execute("INSERT OR REPLACE INTO read_retries VALUES (?,?,?)", (chat, attempt, retry_at(attempt)))
+                        db.commit()
+                        try:
                             self.catalog = None
                             for message in self.messages(start, end):
                                 rows = self.queue_message(db, message)
                                 logger.info("视觉群消息 %s 新增 %d 款", message["message_id"], len(rows))
                             db.execute("UPDATE progress SET cursor=? WHERE chat=?", (end, chat))
+                            db.execute("DELETE FROM read_retries WHERE chat=?", (chat,))
                             db.commit()
-                        if read_delay:
-                            logger.info("[优化] 群消息补读已恢复")
-                        read_delay = 0
-                        read_retry_at = None
-                    except Exception as exc:
-                        db.rollback()
-                        if not read_delay:
-                            logger.exception("[优化] 群消息读取失败，30 秒后从原进度补读")
-                            send_error("", "读取与解析群消息", exc, self.client, title="视觉共享群同步",
-                                       visual=True, incident=str(uuid.uuid4()))
-                        read_delay = min(read_delay * 2, 300) if read_delay else 30
-                        read_retry_at = time.monotonic() + read_delay
+                            if retry:
+                                logger.info("[优化] 群消息补读已恢复")
+                        except Exception as exc:
+                            db.rollback()
+                            db.execute("UPDATE read_retries SET retry_at=? WHERE chat=?", (retry_at(attempt), chat))
+                            db.commit()
+                            if attempt == 1:
+                                logger.exception("[优化] 群消息读取失败，%s", retry_result(attempt))
+                                send_error("", "读取与解析群消息", exc, self.client, title="视觉共享群同步",
+                                           visual=True, incident=f"{chat}/read/{start}")
+                            elif attempt == MAX_ATTEMPTS:
+                                logger.exception("[优化] 群消息读取第 %s 次失败，停止本轮自动补读", attempt)
                 self.deliver(db)
-                next_retry, = db.execute(
-                    "SELECT MIN(notify_after) FROM jobs WHERE sent=0 AND notify_attempts < ?",
-                    (NOTIFY_MAX_ATTEMPTS,),
+                deadline, = db.execute(
+                    "SELECT MIN(retry_at) FROM (SELECT retry_at FROM jobs WHERE sent=0 "
+                    "UNION ALL SELECT retry_at FROM read_retries WHERE chat=?)", (chat,),
                 ).fetchone()
-                wait = max(0, next_retry - time.time()) if next_retry is not None else None
-                if read_retry_at is not None:
-                    read_wait = max(0, read_retry_at - time.monotonic())
-                    wait = read_wait if wait is None else min(wait, read_wait)
+                wait = max(0, deadline - time.time()) if deadline is not None else None
                 read_pending = wake.wait(wait)
                 if read_pending:
                     wake.clear()
