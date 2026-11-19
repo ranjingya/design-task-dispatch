@@ -9,7 +9,7 @@ import re
 from flask import Flask, jsonify, request
 
 from app.config import Settings, load_fields
-from app.notifications import RECORD_NOTIFICATION_EVENTS, notify_record, send_error
+from app.notifications import DeliveryFailure, RECORD_NOTIFICATION_EVENTS, notify_record, send_error
 from app.feishu import FeishuClient
 from app.dispatch import Dispatcher
 from app.task_logging import configure_logging
@@ -78,10 +78,13 @@ def create_app(settings: Settings | None = None, dispatcher=None) -> Flask:
             return jsonify(error="event 无效"), 400
         try:
             status = notify_record(record_id, event, load_fields(settings.fields_path), FeishuClient(settings))
-            logger.info("流程通知 事件=%s record=%s 结果=%s", event, record_id, status)
+            if status in {"skipped", "disabled"}:
+                reason = "未满足发送条件" if status == "skipped" else "通知未启用"
+                logger.info("[需求] 已跳过（%s） 事件=%s record=%s", reason, event, record_id)
             return jsonify(status=status, record_id=record_id, event=event)
         except Exception as exc:
-            logger.exception("流程通知失败 事件=%s record=%s", event, record_id)
+            if not isinstance(exc, DeliveryFailure):
+                logger.exception("[需求] 流程通知失败 事件=%s record=%s", event, record_id)
             stage = {"leader_confirmed": "组长确认通知", "assignee_confirmed": "负责人确认通知",
                      "deadline_reminder": "截止日期提醒"}[event]
             send_error(record_id, stage, exc, FeishuClient(settings))

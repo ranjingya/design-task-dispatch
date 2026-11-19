@@ -42,11 +42,15 @@ enabled = false
     return client
 
 
-def test_only_enabled_person_and_persistent_dedup(client, monkeypatch):
+def test_only_enabled_person_and_persistent_dedup(client, monkeypatch, caplog):
+    caplog.set_level("INFO", logger="app.notifications")
     send = Mock(return_value='om_test')
     monkeypatch.setattr(FeishuClient, 'send_card', send)
     assert send_new_task('recTest', MAPPING, client)
     assert send_new_task('recTest', MAPPING, client)
+    assert caplog.text.count("[需求] 已发送") == 1
+    assert caplog.text.count("[需求] 已跳过（此前已发送）") == 1
+    assert "message=om_test" in caplog.text
     assert send.call_count == 1
     assert send.call_args.args[0] == 'ou_usera'
     text = json.dumps(send.call_args.args[1], ensure_ascii=False)
@@ -165,7 +169,7 @@ def test_error_notification_failure_is_best_effort(error_client, monkeypatch, ca
     monkeypatch.setattr(FeishuClient, 'send_card', send)
     assert not send_error('recFailure', '读取材料', ValueError('材料错误'), error_client)
     assert send.call_count == 1
-    assert '通知失败 事件=error' in caplog.text
+    assert '[需求] 发送失败 异常提醒' in caplog.text
     error_client.get_record.assert_not_called()
     error_client.update_record.assert_not_called()
 

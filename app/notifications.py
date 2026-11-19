@@ -20,6 +20,13 @@ from app.rules import plain
 logger = logging.getLogger(__name__)
 RECORD_NOTIFICATION_EVENTS = frozenset({"leader_confirmed", "assignee_confirmed", "deadline_reminder"})
 
+EVENT_LABELS = {"new_task": "新增需求", "leader_confirmed": "组长已确认", "assignee_confirmed": "负责人已接收确认",
+                "deadline_reminder": "截止日期提醒", "error": "异常提醒"}
+
+
+class DeliveryFailure(RuntimeError):
+    """已逐人记录投递失败原因。"""
+
 
 def load_notifications(path, event="new_task"):
     """功能说明：读取通知配置。参数 path：TOML 路径；event：通知事件。返回值：通过校验的事件配置，未启用时返回空字典。"""
@@ -183,9 +190,10 @@ def send_error(record_id, stage, error, feishu, title=None, *, visual=False, tab
                 content["body"]["elements"].pop()
             red_card(content)
         # 同一故障沿用已有发送回执，独立失败可分别告警。
-        return deliver(record_id, {}, feishu, recipients, "error", version=incident or str(time.time_ns()), content=content)
+        return deliver(record_id, {}, feishu, recipients, "error", version=incident or str(time.time_ns()),
+                       content=content, source="优化" if visual else "需求", title=title)
     except Exception as exc:
-        logger.warning("报错通知失败 原因=%s", exc)
+        logger.warning("[%s] 异常提醒失败 原因=%s", "优化" if visual else "需求", exc)
         return False
 
 
@@ -257,18 +265,20 @@ def notify_record(record_id, event, mapping, feishu):
         if uid not in {p["open_id"] for p in recipients}:
             recipients.append({"open_id": uid, "name": person.get("name") or "记录人员"})
     if not deliver(record_id, mapping, feishu, recipients, event, fields, version):
-        raise RuntimeError("部分通知发送失败，可重试同一请求")
+        raise DeliveryFailure("部分通知发送失败，可重试同一请求")
     return "sent_or_duplicate"
 
 
-def deliver(record_id, mapping, feishu, recipients, event, fields=None, version="", content=None):
-    """功能说明：按接收人持久化去重并发送卡片。参数 record_id：记录 ID；mapping：字段映射；feishu：数据客户端；recipients：接收人；event：事件；fields：可选记录快照；version：通知版本；content：可选的预生成卡片。返回值：是否全部成功。"""
+def deliver(record_id, mapping, feishu, recipients, event, fields=None, version="", content=None, *, source="需求", title=None):
+    """功能说明：按接收人持久化去重并发送卡片。参数 record_id：记录 ID；mapping：字段映射；feishu：数据客户端；recipients：接收人；event：事件；fields：可选记录快照；version：通知版本；content：可选的预生成卡片；source：日志所属业务；title：用于日志的任务名称。返回值：是否全部成功。"""
     settings = feishu.settings
     if not settings.alert_app_id or not settings.alert_app_secret:
         raise ValueError("请配置 FEISHU_ALERT_APP_ID 和 FEISHU_ALERT_APP_SECRET")
     bot = FeishuClient(replace(settings, app_id=settings.alert_app_id, app_secret=settings.alert_app_secret))
     folder = settings.rules_cache_path.parent / "notifications"
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    title = title or plain((fields or {}).get(mapping.get("title"))) or record_id
+    label = EVENT_LABELS[event]
     success = True
     for person in recipients:
         # 按应用、表、记录和接收人去重；锁覆盖发送与落盘，供后台和 CLI 共用。
@@ -282,7 +292,8 @@ def deliver(record_id, mapping, feishu, recipients, event, fields=None, version=
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 state = json.loads(path.read_text()) if path.exists() else {}
                 if state.get("sent"):
-                    logger.debug("通知跳过：已发送 event=%s recipient=%s", event, person["name"])
+                    logger.info("[%s] 已跳过（此前已发送） %s 任务=%s 接收人=%s record=%s",
+                                source, label, title, person["name"], record_id)
                     continue
                 # 飞书 UUID 仅保证一小时去重；超时的未知结果不能自动重发。
                 if state and time.time() - state["started_at"] >= 3600:
@@ -290,15 +301,18 @@ def deliver(record_id, mapping, feishu, recipients, event, fields=None, version=
                 if not state:
                     if content is None:
                         snapshot = fields if fields is not None else feishu.get_record(record_id)
+                        title = plain(snapshot.get(mapping.get("title"))) or title
                         content = notification_content(record_id, snapshot, mapping, settings, feishu, event)
                     state = {"sent": False, "started_at": time.time(), "content": content}
                     save_state(path, state)
                 message_id = bot.send_card(person["open_id"], state["content"], key[:50])
                 save_state(path, {"sent": True, "message_id": message_id})
-                logger.info("通知已发送 事件=%s 接收人=%s", event, person["name"])
+                logger.info("[%s] 已发送 %s 任务=%s 接收人=%s record=%s message=%s",
+                            source, label, title, person["name"], record_id, message_id)
         except Exception as exc:
             success = False
-            logger.warning("通知失败 事件=%s 接收人=%s 原因=%s", event, person["name"], str(exc))
+            logger.warning("[%s] 发送失败 %s 任务=%s 接收人=%s record=%s 原因=%s",
+                           source, label, title, person["name"], record_id, exc)
     return success
 
 

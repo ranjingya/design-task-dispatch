@@ -38,7 +38,16 @@ def listen_visual_events(settings, on_message, on_connected):
         if event.message.chat_id == settings.visual_sync_chat_id and event.sender.sender_type == "user":
             on_message(event.message.message_id)
 
-    handler = lark.EventDispatcherHandler.builder("", "").register_p2_im_message_receive_v1(received).build()
+    def ignore(_data):
+        """已读和表情事件只向飞书确认接收。"""
+
+    handler = (lark.EventDispatcherHandler.builder("", "")
+               .register_p2_im_message_receive_v1(received)
+               .register_p2_im_message_message_read_v1(ignore)
+               .register_p2_im_message_reaction_created_v1(ignore)
+               .register_p2_im_message_reaction_deleted_v1(ignore)
+               .build())
+
     class VisualEventClient(lark.ws.Client):
         async def _connect(self):
             """握手成功后触发补读，覆盖 SDK 的首次连接与内部自动重连。"""
@@ -284,6 +293,8 @@ class VisualSync:
                 (str(uuid.uuid4()), source, message_text(message, include_mentions=False)),
             ).fetchone()
             if slot is None:
+                logger.info("[优化] 已跳过（重复群消息） 商品=%s %s message=%s",
+                            row[fields["code"]], row[fields["name"]], message["message_id"])
                 continue
             assignee = pool[0]
             if len(pool) > 1:
@@ -403,7 +414,11 @@ class VisualSync:
             if claim is None:
                 continue
             attempt, = claim
+            owner = "待解析"
+            product = f"{row.get(fields['code'], '')} {row.get(fields['name'], '')}".strip()
             try:
+                owner_id = row[fields["owner"]][0]["id"]
+                owner = next((name for name, uid in self.members.items() if uid == owner_id), owner_id)
                 settings = self.client.settings
                 if self.bot is None:
                     self.bot = FeishuClient(replace(settings, app_id=settings.alert_app_id,
@@ -415,17 +430,18 @@ class VisualSync:
                     notification_body = message_text(original, include_mentions=False)
                     db.execute("UPDATE jobs SET notification_body=? WHERE id=?", (notification_body, key))
                     db.commit()
-                recipient = alert_open_id(row[fields["owner"]][0]["id"], self.client, self.bot)
+                recipient = alert_open_id(owner_id, self.client, self.bot)
                 card = self.reminder_card(row, record, recipient, notification_body)
                 message_id = self.bot.send_card(recipient, card, key, retry_transient=False)
                 db.execute("UPDATE jobs SET sent=1 WHERE id=?", (key,))
                 db.commit()
-                logger.info("视觉需求已登记并提醒 %s record=%s message=%s", row[fields["code"]], record, message_id)
+                logger.info("[优化] 已发送 商品=%s 接收人=%s record=%s message=%s", product, owner, record, message_id)
             except Exception as exc:
                 db.execute("UPDATE jobs SET notify_after=? WHERE id=?", (time.time() + NOTIFY_RETRY_SECONDS, key))
                 db.commit()
                 outcome = "停止重试" if attempt == NOTIFY_MAX_ATTEMPTS else "30 秒后重试"
-                logger.exception("视觉需求通知失败 %s/%s，%s record=%s", attempt, NOTIFY_MAX_ATTEMPTS, outcome, record)
+                logger.exception("[优化] 发送失败 商品=%s 接收人=%s 第 %s/%s 次，%s record=%s",
+                                 product, owner, attempt, NOTIFY_MAX_ATTEMPTS, outcome, record)
                 stage = "发送负责人提醒"
                 send_error(record, stage, exc, self.client, title=row.get(fields["code"]),
                            visual=True, table_id=self.config["table"],
@@ -458,8 +474,11 @@ class VisualSync:
             db.commit()
             # 启动后收到首次握手信号再补读，覆盖握手前的消息；已有任务可立即恢复。
             read_pending = False
-            read_incident = None
+            read_delay = 0
+            read_retry_at = None
             while not stop.is_set():
+                if read_retry_at is not None:
+                    read_pending = time.monotonic() >= read_retry_at
                 if read_pending:
                     try:
                         start = db.execute("SELECT cursor FROM progress WHERE chat=?", (chat,)).fetchone()[0]
@@ -471,19 +490,27 @@ class VisualSync:
                                 logger.info("视觉群消息 %s 新增 %d 款", message["message_id"], len(rows))
                             db.execute("UPDATE progress SET cursor=? WHERE chat=?", (end, chat))
                             db.commit()
-                        read_incident = None
+                        if read_delay:
+                            logger.info("[优化] 群消息补读已恢复")
+                        read_delay = 0
+                        read_retry_at = None
                     except Exception as exc:
                         db.rollback()
-                        logger.exception("视觉群读取失败，下次触发从当前进度补读")
-                        read_incident = read_incident or str(uuid.uuid4())
-                        send_error("", "读取与解析群消息", exc, self.client, title="视觉共享群同步",
-                                   visual=True, incident=read_incident)
+                        if not read_delay:
+                            logger.exception("[优化] 群消息读取失败，30 秒后从原进度补读")
+                            send_error("", "读取与解析群消息", exc, self.client, title="视觉共享群同步",
+                                       visual=True, incident=str(uuid.uuid4()))
+                        read_delay = min(read_delay * 2, 300) if read_delay else 30
+                        read_retry_at = time.monotonic() + read_delay
                 self.deliver(db)
                 next_retry, = db.execute(
                     "SELECT MIN(notify_after) FROM jobs WHERE sent=0 AND notify_attempts < ?",
                     (NOTIFY_MAX_ATTEMPTS,),
                 ).fetchone()
                 wait = max(0, next_retry - time.time()) if next_retry is not None else None
+                if read_retry_at is not None:
+                    read_wait = max(0, read_retry_at - time.monotonic())
+                    wait = read_wait if wait is None else min(wait, read_wait)
                 read_pending = wake.wait(wait)
                 if read_pending:
                     wake.clear()

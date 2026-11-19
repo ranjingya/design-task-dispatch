@@ -141,6 +141,9 @@ def test_server_event_only_wakes_for_target_group_users(monkeypatch):
         payload = {"schema": "2.0", "header": {"event_type": "im.message.receive_v1"},
                    "event": {"sender": {"sender_type": sender}, "message": {"chat_id": chat, "message_id": "om_test"}}}
         handler._do_without_validation(json.dumps(payload).encode())
+    for kind in ("message_read", "reaction.created", "reaction.deleted"):
+        payload = {"schema": "2.0", "header": {"event_type": f"im.message.{kind}_v1"}, "event": {}}
+        handler._do_without_validation(json.dumps(payload).encode())
     received.assert_called_once_with("om_test")
 
 def test_notification_body_keeps_paths_links_and_plain_at_characters():
@@ -259,3 +262,42 @@ def test_visual_reassignment_preserves_order_on_replay_rollback_and_restart(tmp_
             assert worker.client.create_visual_record.call_args.args[1]["负责人"] == [{"id": expected}]
             assert worker.bot.send_card.call_args.args[0] == expected
     assert worker.bot.send_card.call_count == len(order)
+
+
+def test_failed_read_retries_to_cap_and_resumes_idle(tmp_path, monkeypatch, caplog):
+    """没有新事件时同一窗口反复失败也能恢复，只告警一次，恢复后继续等待事件。"""
+    worker = worker_with_catalog()
+    worker.client.settings.rules_cache_path = tmp_path / "rules.json"
+    worker.messages = Mock(side_effect=[RuntimeError("模拟读取失败")] * 6 + [[]])
+    alert = Mock()
+    monkeypatch.setattr("app.visual_sync.send_error", alert)
+    now = 20
+    monkeypatch.setattr("app.visual_sync.time.time", lambda: now)
+    monkeypatch.setattr("app.visual_sync.time.monotonic", lambda: now)
+    stop = Mock()
+    stop.is_set.return_value = False
+    waits = []
+
+    def wait(timeout):
+        """首次握手后只推进虚拟时钟，恢复到空闲时结束。"""
+        nonlocal now
+        waits.append(timeout)
+        if len(waits) == 1:
+            return True
+        if timeout is None:
+            stop.is_set.return_value = True
+        else:
+            now += timeout
+        return False
+
+    wake = Mock()
+    wake.wait.side_effect = wait
+    caplog.set_level("INFO", logger="app.visual_sync")
+    worker.poll(stop, 10000, wake)
+    assert waits == [None, 30, 60, 120, 240, 300, 300, None]
+    assert [call.args[0] for call in worker.messages.call_args_list] == [10000] * 7
+    alert.assert_called_once()
+    assert caplog.text.count("[优化] 群消息读取失败") == 1
+    assert caplog.text.count("[优化] 群消息补读已恢复") == 1
+    with sqlite3.connect(tmp_path / "visual_sync.sqlite3") as db:
+        assert db.execute("SELECT cursor FROM progress").fetchone() == (now * 1000 - 3000,)

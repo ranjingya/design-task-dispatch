@@ -181,7 +181,7 @@ def process_record(record_id: str, mapping: dict[str, str], feishu: FeishuClient
                            title=plain(fields.get(mapping.get("title"))))
         except Exception as exc:
             task_details(outcome="回写成功，通知待补发")
-            logger.warning("新增通知失败 原因=%s", exc)
+            logger.warning("[需求] 新增通知失败 原因=%s", exc)
             send_error(record_id, "新增通知", exc, feishu, title=plain(fields.get(mapping.get("title"))))
 
 
